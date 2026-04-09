@@ -16,11 +16,11 @@ sources:
   # PostgreSQL — transactional data (Yelp: business, review, user)
   # ------------------------------------------------------------------
   postgres_yelp:
-    kind: "cloud-sql-postgres"          # Change to "postgres" for local instances
-    host: "<POSTGRES_HOST>"             # e.g. 127.0.0.1 or Tailscale IP
+    kind: "postgres"
+    host: "127.0.0.1"
     port: 5432
     database: "yelp"
-    user: "<POSTGRES_USER>"
+    user: "${POSTGRES_USER}"
     password: "${POSTGRES_PASSWORD}"    # Loaded from .env — never hardcode
 
   # ------------------------------------------------------------------
@@ -28,24 +28,22 @@ sources:
   # ------------------------------------------------------------------
   mongo_yelp:
     kind: "mongodb"
-    uri: "mongodb://<MONGO_HOST>:27017" # Replace with actual host
+    uri: "mongodb://127.0.0.1:27017"
     database: "yelp_mongo"
-    user: "<MONGO_USER>"
-    password: "${MONGO_PASSWORD}"
 
   # ------------------------------------------------------------------
   # SQLite — lightweight datasets (loaded from file path)
   # ------------------------------------------------------------------
   sqlite_dab:
     kind: "sqlite"
-    db_path: "/shared/tenai-infra/data/dab_sqlite.db"  # Update path after loading
+    db_path: "/home/natnael/oracle-forge/db/dab_sqlite.db"
 
   # ------------------------------------------------------------------
   # DuckDB — analytical / time-series datasets
   # ------------------------------------------------------------------
   duckdb_dab:
     kind: "duckdb"
-    db_path: "/shared/tenai-infra/data/dab_duckdb.db"  # Update path after loading
+    db_path: "/home/natnael/oracle-forge/db/dab_duckdb.db"
 
 tools:
 
