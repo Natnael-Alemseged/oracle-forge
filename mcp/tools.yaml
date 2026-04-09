@@ -29,7 +29,7 @@ sources:
   mongo_yelp:
     kind: "mongodb"
     uri: "mongodb://127.0.0.1:27017"
-    database: "yelp_mongo"
+    database: "yelp_db"
 
   # ------------------------------------------------------------------
   # SQLite — lightweight datasets (loaded from file path)
@@ -43,7 +43,7 @@ sources:
   # ------------------------------------------------------------------
   duckdb_dab:
     kind: "duckdb"
-    db_path: "/home/natnael/oracle-forge/db/dab_duckdb.db"
+    db_path: "/home/natnael/oracle-forge/db/yelp_user.db"
 
 tools:
 
