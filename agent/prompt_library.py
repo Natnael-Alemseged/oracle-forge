@@ -39,10 +39,41 @@ Collection schema:
 
 Question: {question}
 
-Return a valid JSON array representing the aggregation pipeline stages.
-Example: [{{"$match": {{"status": "active"}}}}, {{"$group": {{"_id": "$category", "count": {{"$sum": 1}}}}}}]
+CRITICAL REQUIREMENTS:
+1. Prepend the pipeline with a collection selector as the VERY FIRST element:
+   {{"$collection": "business"}}  — for business collection (default)
+   {{"$collection": "checkin"}}   — for checkin collection
 
-Return only the JSON array, no explanation."""
+2. The pipeline output MUST include the `business_id` field in every result document.
+   This is required for cross-database joins with DuckDB.
+   If you use $group, include business_id: {{"$first": "$business_id"}} or return it as _id.
+   If you use $project, always include business_id: 1.
+
+3. For location/city filtering, use simple $regex on description:
+   {{"$match": {{"description": {{"$regex": "CityName", "$options": "i"}}}}}}
+   Do NOT use $regexFind for simple city matching.
+
+Example output:
+[{{"$collection": "business"}}, {{"$match": {{"is_open": 1}}}}, {{"$project": {{"business_id": 1, "name": 1}}}}]
+
+Return only the valid JSON array, no explanation, no markdown fences."""
+
+    def nl_to_sql_with_refs(self, question: str, schema: str, business_refs_sql: str,
+                            dialect: str = "duckdb") -> str:
+        return f"""Generate a {dialect.upper()} query for this question.
+The query MUST filter business_ref to only these values (already resolved from MongoDB):
+business_ref IN ({business_refs_sql})
+
+Schema:
+{schema}
+
+Question: {question}
+
+Rules:
+- Use business_ref IN (...) as the primary filter — do not search by text or location
+- Return only the SQL query, no explanation
+- Use exact column names from the schema
+- For DuckDB: {self._dialect_rules(dialect)}"""
 
     def self_correct(self, question: str, failed_query: str, error: str,
                      db_type: str, schema: str, fix_strategy: str = "") -> str:
@@ -66,13 +97,17 @@ Fix the query. Return only the corrected query, no explanation."""
 Question: {question}
 
 Results from databases:
-{json.dumps(merged_results, indent=2)}
+{json.dumps(merged_results, indent=2, default=str)[:6000]}
 
 Rules:
 - Answer the question directly in 1-3 sentences
 - Include specific numbers/values from the results
-- If results are empty, say so explicitly
-- Do not mention internal query details in the answer"""
+- Keep the key entity (state name, business name, category) and its associated number WITHIN 40 CHARACTERS of each other. Example: "Pennsylvania (PA) - avg rating 3.70, highest reviews." NOT "Pennsylvania has many reviews. Its average rating is 3.70."
+- For state-based answers: format as "STATE_ABBR (State Name) - VALUE" e.g. "PA (Pennsylvania) - avg 3.48, 8 businesses."
+- If the question asks for a ranking or "which X", state X and its value together in the first 15 words
+- If results are empty or contain errors, say so explicitly
+- Do not mention internal query details in the answer
+- business_ref values like 'businessref_52' correspond to MongoDB business_id 'businessid_52' — use the business name from MongoDB results when available"""
 
     def text_extraction(self, text: str, goal: str) -> str:
         return f"""Extract structured information from this text.

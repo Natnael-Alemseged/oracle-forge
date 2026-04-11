@@ -58,6 +58,27 @@ class ContextManager:
         keep_end = char_budget - keep_start
         return text[:keep_start] + "\n...[context truncated to fit token budget]...\n" + text[-keep_end:]
 
+    def get_schema_for_db(self, db_type: str) -> str:
+        """Extract the schema section for a specific DB type from AGENT.md."""
+        content = self._load_layer1_schema()
+        # Map db_type to the heading used in AGENT.md
+        heading_map = {
+            "mongodb":    "### MongoDB",
+            "duckdb":     "### DuckDB",
+            "postgresql": "### PostgreSQL",
+            "sqlite":     "### SQLite",
+        }
+        heading = heading_map.get(db_type)
+        if not heading:
+            return content
+        start = content.find(heading)
+        if start == -1:
+            return content
+        # Find the next top-level heading (##) after our section
+        next_heading = content.find("\n## ", start + 1)
+        end = next_heading if next_heading != -1 else len(content)
+        return content[start:end].strip()
+
     def add_to_session(self, query: str, result_summary: str, correction: Optional[str] = None):
         self._session_history.append({
             "query": query,

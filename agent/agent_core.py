@@ -44,20 +44,18 @@ class AgentCore:
 
     def _generate_query_for_db(self, question: str, db_type: str, intent: dict) -> str:
         """Generate a query string for a specific database type."""
-        # Schema is loaded from context — stub returns placeholder until AGENT.md has real schema
-        schema = self._get_schema_for_db(db_type)
+        schema = self.ctx.get_schema_for_db(db_type)
+        system_context = self.ctx.get_full_context()
         if db_type == "mongodb":
             prompt = self.prompts.nl_to_mongodb(question, schema)
         else:
             prompt = self.prompts.nl_to_sql(question, schema, dialect=db_type)
 
-        raw = llm_client.call(self.client, prompt, max_tokens=512)
-        return _strip_markdown(raw)
-
-    def _get_schema_for_db(self, db_type: str) -> str:
-        """Return schema string for the given DB type. Populated once AGENT.md has real schemas."""
-        # TODO (Day 5): replace with real schema parsed from AGENT.md via ContextManager
-        return f"# Schema for {db_type}\n(See AGENT.md for full schema — populate before first run)"
+        raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
+        cleaned = _strip_markdown(raw)
+        if not _looks_like_query(cleaned, db_type):
+            raise ValueError(f"LLM returned non-query text for {db_type}: {cleaned[:120]}")
+        return cleaned
 
     async def run(self, request: QueryRequest, query_executor=None) -> AgentResponse:
         """Main orchestration loop: analyze → decompose → execute → synthesize → log."""
@@ -68,10 +66,43 @@ class AgentCore:
         intent = self.analyze_intent(request.question, request.available_databases)
         sub_queries = self.decompose_query(request.question, intent)
 
-        for sq in sub_queries:
-            result, corrections = self._execute_with_retry(sq, request.question)
-            raw_results[sq.database_type] = result
-            self_corrections.extend(corrections)
+        mongo_sq = next((sq for sq in sub_queries if sq.database_type == "mongodb"), None)
+        duck_sq  = next((sq for sq in sub_queries if sq.database_type == "duckdb"),  None)
+
+        if mongo_sq and duck_sq:
+            # Sequential join: run MongoDB first, translate business_ids → business_refs,
+            # regenerate DuckDB query filtered to exactly those refs.
+            mongo_result, mongo_corr = self._execute_with_retry(mongo_sq, request.question)
+            raw_results["mongodb"] = mongo_result
+            self_corrections.extend(mongo_corr)
+
+            business_refs = _extract_business_refs(mongo_result)
+            if business_refs:
+                try:
+                    new_query = self._generate_duckdb_with_refs(request.question, intent, business_refs)
+                    duck_sq = SubQuery(
+                        database_type="duckdb",
+                        query=new_query,
+                        intent=duck_sq.intent,
+                    )
+                    merge_operations.append(
+                        f"mongo→duckdb join on {len(business_refs)} business_refs"
+                    )
+                except ValueError:
+                    # LLM returned non-query — keep original duck_sq
+                    pass
+            duck_result, duck_corr = self._execute_with_retry(duck_sq, request.question)
+            raw_results["duckdb"] = duck_result
+            self_corrections.extend(duck_corr)
+
+            # Replace duck_sq in sub_queries for the trace
+            sub_queries = [mongo_sq if sq.database_type == "mongodb" else duck_sq
+                           for sq in sub_queries]
+        else:
+            for sq in sub_queries:
+                result, corrections = self._execute_with_retry(sq, request.question)
+                raw_results[sq.database_type] = result
+                self_corrections.extend(corrections)
 
         answer = self._synthesize(request.question, raw_results)
 
@@ -92,7 +123,7 @@ class AgentCore:
         """Execute a sub-query, retrying up to max_retries on failure with self-correction."""
         corrections = []
         current_query = sub_query.query
-        schema = self._get_schema_for_db(sub_query.database_type)
+        schema = self.ctx.get_schema_for_db(sub_query.database_type)
 
         for attempt in range(self.corrector.max_retries + 1):
             try:
@@ -125,6 +156,18 @@ class AgentCore:
 
         return {"error": "max retries exceeded"}, corrections
 
+    def _generate_duckdb_with_refs(self, question: str, intent: dict, business_refs: list[str]) -> str:
+        """Generate a DuckDB query pre-filtered to specific business_refs from MongoDB results."""
+        refs_sql = ", ".join(f"'{r}'" for r in business_refs)
+        schema = self.ctx.get_schema_for_db("duckdb")
+        system_context = self.ctx.get_full_context()
+        prompt = self.prompts.nl_to_sql_with_refs(question, schema, refs_sql)
+        raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
+        cleaned = _strip_markdown(raw)
+        if not _looks_like_query(cleaned, "duckdb"):
+            raise ValueError(f"LLM returned non-query text for duckdb: {cleaned[:120]}")
+        return cleaned
+
     def _call_mcp(self, db_type: str, query: str) -> dict:
         """Call the MCP server (Python replacement for toolbox binary) via QueryExecutor."""
         sub_query = SubQuery(database_type=db_type, query=query, intent="")
@@ -152,7 +195,41 @@ class AgentCore:
             json.dump(log_entry, f, indent=2)
 
 
-_MARKDOWN_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)```")
+_MARKDOWN_FENCE = re.compile(r"```[\w]*\n?([\s\S]*?)```")
+
+
+def _strip_markdown(text: str) -> str:
+    """Strip markdown code fences. Line-based for fences at start, regex for embedded fences."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = lines[1:]  # drop opening fence line (```lang)
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]  # drop closing fence
+        return "\n".join(lines).strip()
+    # LLM may prepend explanation text before the fence — extract the fenced block
+    match = _MARKDOWN_FENCE.search(text)
+    return match.group(1).strip() if match else text
+
+
+def _looks_like_query(text: str, db_type: str) -> bool:
+    """Return False if the text looks like LLM reasoning rather than a query."""
+    t = text.strip().lower()
+    if db_type == "mongodb":
+        return t.startswith("[") or t.startswith("{")
+    return any(t.startswith(k) for k in ("select", "with", "insert", "update", "delete", "explain"))
+
+
+def _extract_business_refs(mongo_result) -> list[str]:
+    """Convert MongoDB business_id values to DuckDB business_ref format (businessid_N → businessref_N)."""
+    docs = mongo_result if isinstance(mongo_result, list) else mongo_result.get("rows", [])
+    refs = []
+    for doc in docs:
+        bid = doc.get("business_id", "")
+        if bid.startswith("businessid_"):
+            n = bid.split("businessid_", 1)[1]
+            refs.append(f"businessref_{n}")
+    return refs
 
 
 def _strip_markdown(text: str) -> str:

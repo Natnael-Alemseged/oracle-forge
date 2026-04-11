@@ -1,18 +1,16 @@
 """
 mcp/mcp_server.py
 -----------------
-Python replacement for the MCP Toolbox binary, which fails silently on this
-server due to its embedded Snowflake CGO library calling exit(1) at startup
-whenever a tools file is loaded.
+MCP-compatible server with full 5-DB coverage (PostgreSQL, MongoDB, SQLite,
+DuckDB, cross-DB merge). The Google toolbox binary fails on this VPS due to
+a Snowflake CGO bug, and the npm wrapper does not support DuckDB.
 
-Implements the same HTTP API the MCP Toolbox would expose:
-  GET  /v1/tools                     — list available tools
-  POST /v1/tools/{tool_name}:invoke  — execute a tool and return results
+Exposes two equivalent APIs so either client style works:
+  MCP JSON-RPC 2.0  POST /mcp              — used by query_executor.py
+  REST (legacy)     POST /v1/tools/{n}:invoke
 
 Usage:
-    cd /home/natnael/oracle-forge
-    source .venv/bin/activate
-    source .env
+    source .venv/bin/activate && source .env
     uvicorn mcp.mcp_server:app --port 5000
 """
 
@@ -117,6 +115,56 @@ def list_tools():
     return {"tools": TOOLS}
 
 
+@app.post("/mcp")
+async def mcp_rpc(body: Optional[dict] = None):
+    """Minimal MCP JSON-RPC 2.0 endpoint supporting tools/list and tools/call."""
+    req = body or {}
+    req_id = req.get("id")
+    method = req.get("method")
+    params = req.get("params", {}) or {}
+
+    if req.get("jsonrpc") != "2.0":
+        return _rpc_error(req_id, -32600, "Invalid Request: jsonrpc must be '2.0'")
+
+    if method == "tools/list":
+        tools = []
+        for tool in TOOLS:
+            props = tool.get("parameters", {})
+            tools.append(
+                {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": props,
+                        "required": list(props.keys()),
+                    },
+                }
+            )
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}}
+
+    if method == "tools/call":
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {}) or {}
+        if not tool_name:
+            return _rpc_error(req_id, -32602, "Invalid params: 'name' is required")
+        try:
+            result = await asyncio.to_thread(_dispatch, tool_name, arguments)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": json.dumps(result)}]
+                },
+            }
+        except ValueError as e:
+            return _rpc_error(req_id, -32602, str(e))
+        except Exception as e:
+            return _rpc_error(req_id, -32000, str(e))
+
+    return _rpc_error(req_id, -32601, f"Method not found: {method}")
+
+
 @app.post("/v1/tools/{tool_name}:invoke")
 async def invoke_tool(tool_name: str = Path(...), body: Optional[dict] = None):
     params = body or {}
@@ -127,6 +175,10 @@ async def invoke_tool(tool_name: str = Path(...), body: Optional[dict] = None):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         return JSONResponse(status_code=200, content={"error": str(e)})
+
+
+def _rpc_error(req_id: Any, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
 # ---------------------------------------------------------------------------

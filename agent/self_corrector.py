@@ -1,6 +1,16 @@
+import re
+
 from openai import OpenAI
 from agent.prompt_library import PromptLibrary
 from agent import llm_client
+
+_MARKDOWN_FENCE = re.compile(r"```[\w]*\n?([\s\S]*?)```")
+
+
+def _strip_markdown(text: str) -> str:
+    text = text.strip()
+    match = _MARKDOWN_FENCE.search(text)
+    return match.group(1).strip() if match else text
 
 
 class SelfCorrector:
@@ -18,7 +28,7 @@ class SelfCorrector:
         prompt = self.prompts.self_correct(
             original_question, failed_query, error, db_type, schema, fix_strategy
         )
-        return llm_client.call(self.client, prompt, max_tokens=512)
+        return _strip_markdown(llm_client.call(self.client, prompt, max_tokens=512))
 
     def diagnose_failure(self, error: str, query: str) -> str:
         """Categorize the failure into one of 4 types to guide correction strategy."""

@@ -25,9 +25,23 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | name | str | "Steps to Learning Montessori Preschool" |
 | review_count | int | 8, 81, 39 |
 | is_open | int | 1 (open), 0 (closed) |
-| attributes | dict | {"BusinessAcceptsCreditCards": "True", "WiFi": "u'no'"} |
+| attributes | dict | {"BusinessAcceptsCreditCards": "True", "WiFi": "u'no'", "BusinessParking": "{'garage': False, 'lot': True, ...}", "BikeParking": "True"} |
 | hours | dict | {"Monday": "7:0-18:0", "Tuesday": "7:0-18:0", ...} |
-| description | str | Free-text location and category description |
+| description | str | ALWAYS follows this pattern: "Located at [address] in [City], [STATE_ABBR], this [business type] offers ... [Category1], [Category2], [Category3]." |
+
+**description field parsing rules:**
+- **City-specific queries** (e.g., "businesses in Indianapolis"): Use `{$match: {description: {$regex: "Indianapolis", $options: "i"}}}`. Simple and exact.
+- **State-level queries** (e.g., "which state has most X"): Extract state with `$addFields` + `$regexFind`:
+  ```
+  {"$addFields": {"state": {"$arrayElemAt": [{"$split": [{"$regexFind": {"input": "$description", "regex": "in [^,]+, ([A-Z]{2})"}}.captures, ""]}, 0]}}}
+  ```
+  Simpler: match a specific state abbreviation → `{$match: {description: {$regex: ", PA,"}}}` for Pennsylvania.
+- **Categories**: Listed at the end of description after "offers ... in" or "offers ... of", comma-separated.
+  - Example: "...offers Antiques, Shopping, Home Services, and Lighting Fixtures." → categories include Antiques, Shopping, etc.
+  - Extract with: `{"$addFields": {"categories": {"$split": [{"$arrayElemAt": [{"$split": ["$description", "offers "]}, 1]}, ", "]}}}`
+- **WiFi attribute values**: `"u'free'"` or `"u'yes'"` = has WiFi, `"u'no'"` = no WiFi. To find businesses WITH WiFi: `{$match: {"attributes.WiFi": {$nin: [null, "u'no'", "no", "None"]}}}`.
+- **BusinessParking**: stored as string dict, e.g. `"{'garage': False, 'lot': True, ...}"`. To find ANY parking type available: `{$match: {"attributes.BusinessParking": {$regex: "True"}}}`.
+- **BikeParking**: `"True"` or `"False"` as a string. Match with: `{$match: {"attributes.BikeParking": "True"}}`.
 
 **Collection: checkin** (~90 documents)
 | Field | Type | Sample Values |
@@ -47,7 +61,7 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | funny | BIGINT | vote count |
 | cool | BIGINT | vote count |
 | text | VARCHAR | Free-text review content |
-| date | VARCHAR | "August 01, 2016 at 03:44 AM" |
+| date | VARCHAR | "August 01, 2016 at 03:44 AM" — parse year with: EXTRACT(year FROM strptime(date, '%B %d, %Y at %I:%M %p')) or use LIKE '%2018%' |
 
 **Table: tip** (~rows)
 | Field | Type | Sample Values |
@@ -55,7 +69,7 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | user_id | VARCHAR | "userid_548" |
 | business_ref | VARCHAR | "businessref_34" |
 | text | VARCHAR | Free-text tip |
-| date | VARCHAR | "28 Apr 2016, 19:31" |
+| date | VARCHAR | "28 Apr 2016, 19:31" — parse year with: EXTRACT(year FROM strptime(date, '%d %b %Y, %H:%M')) or use LIKE '%2016%' |
 | compliment_count | BIGINT | 0, 1, 2 |
 
 **Table: user** (~rows)
@@ -64,7 +78,7 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | user_id | VARCHAR | "userid_548" |
 | name | VARCHAR | "Todd" |
 | review_count | BIGINT | 376 |
-| yelping_since | VARCHAR | registration date |
+| yelping_since | VARCHAR | registration date — format "15 Jan 2009, 16:40". Extract year with: EXTRACT(year FROM strptime(yelping_since, '%d %b %Y, %H:%M')) or use LIKE '%2016%' |
 | useful | BIGINT | total useful votes received |
 | funny | BIGINT | total funny votes received |
 | cool | BIGINT | total cool votes received |

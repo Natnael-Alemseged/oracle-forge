@@ -11,7 +11,7 @@ def get_client() -> OpenAI:
 
 
 def call(client: OpenAI, prompt: str, system: str = "", max_tokens: int = 1024,
-         model: str = "anthropic/claude-opus-4-6") -> str:
+         model: str = "google/gemini-2.0-flash-001") -> str:
     """Single LLM call. Returns the response text."""
     messages = []
     if system:
