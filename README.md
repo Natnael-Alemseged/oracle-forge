@@ -82,6 +82,15 @@ cd DataAgentBench && bash setup/load_postgres.sh
 curl http://localhost:5000/v1/tools | python3 -m json.tool | grep name
 ```
 
+## Linting
+```bash
+# Run linter
+.venv/bin/python -m ruff check .
+
+# Auto-fix safe issues
+.venv/bin/python -m ruff check . --fix
+```
+
 ## Benchmark
 - Dataset: UC Berkeley DataAgentBench — github.com/ucbepic/DataAgentBench
 - Score log: `eval/score_log.md`
