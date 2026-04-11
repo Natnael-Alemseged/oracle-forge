@@ -1,0 +1,19 @@
+# Score Log — Oracle Forge
+
+## Score Progression
+
+| Run | Date | Queries | pass@1 | Notes |
+|-----|------|---------|--------|-------|
+| Baseline | — | — | — | Pending first end-to-end run (Day 5) |
+
+---
+
+## How to update this log
+
+After each eval run, add a row:
+```
+python eval/run_benchmark.py --agent agent.agent_core --trials 5 --output results/team_results.json
+python eval/score.py --results results/team_results.json
+```
+
+Then add a row to the table above with the date, query count, pass@1, and a one-line note on what changed.
