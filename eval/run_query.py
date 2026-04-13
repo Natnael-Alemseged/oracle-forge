@@ -29,7 +29,7 @@ from agent import llm_client
 # Paths relative to project root
 AGENT_MD   = "agent/AGENT.md"
 CORRECTIONS = "kb/corrections/corrections_log.md"
-DOMAIN_KB  = "kb/domain/domain_knowledge.md"
+DOMAIN_KB  = "kb/domain/domain_terms.md"
 
 # Available databases per dataset
 DATASET_DBS = {

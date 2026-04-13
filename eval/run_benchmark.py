@@ -30,7 +30,7 @@ DAB_ROOT = Path(os.getenv("DAB_ROOT", "/home/yakob/oracle-forge/DataAgentBench")
 
 AGENT_MD    = "agent/AGENT.md"
 CORRECTIONS = "kb/corrections/corrections_log.md"
-DOMAIN_KB   = "kb/domain/domain_knowledge.md"
+DOMAIN_KB   = "kb/domain/domain_terms.md"
 
 DATASET_DBS = {
     "yelp":       ["mongodb", "duckdb"],
