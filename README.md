@@ -16,10 +16,10 @@
 A production-grade natural language data analytics agent that answers complex business questions across PostgreSQL, MongoDB, SQLite, and DuckDB in a single response. Built on DataAgentBench (UC Berkeley).
 
 ## Architecture
-See `agent/AGENT.md`
+See [kb/AGENT.md](kb/AGENT.md)
 
 ## Setup
-See `agent/requirements.txt` and follow the setup instructions in `agent/AGENT.md`
+See [requirements.txt](requirements.txt) and follow the setup instructions in [kb/AGENT.md](kb/AGENT.md)
 
 ## Benchmark
 DataAgentBench: github.com/ucbepic/DataAgentBench
