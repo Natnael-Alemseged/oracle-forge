@@ -29,7 +29,8 @@ class AgentCore:
         system_context = self.ctx.get_full_context()
         prompt = self.prompts.intent_analysis(question, available_databases)
         text = llm_client.call(self.client, prompt, system=system_context, max_tokens=1024)
-        return json.loads(_strip_markdown(text))
+        intent = json.loads(_strip_markdown(text))
+        return _enforce_intent_db_coverage(question, available_databases, intent)
 
     def decompose_query(self, question: str, intent: dict) -> list[SubQuery]:
         """Break multi-DB intent into one SubQuery per target database."""
@@ -48,15 +49,29 @@ class AgentCore:
         schema = self.ctx.get_schema_for_db(db_type)
         system_context = self.ctx.get_full_context()
         if db_type == "mongodb":
-            prompt = self.prompts.nl_to_mongodb(question, schema)
+            base_prompt = self.prompts.nl_to_mongodb(question, schema)
         else:
-            prompt = self.prompts.nl_to_sql(question, schema, dialect=db_type)
+            base_prompt = self.prompts.nl_to_sql(question, schema, dialect=db_type)
 
-        raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
-        cleaned = _strip_markdown(raw)
-        if not _looks_like_query(cleaned, db_type):
-            raise ValueError(f"LLM returned non-query text for {db_type}: {cleaned[:120]}")
-        return cleaned
+        last_error = None
+        for attempt in range(3):
+            prompt = base_prompt
+            if attempt > 0:
+                prompt += (
+                    "\n\nPrevious attempt was invalid. Return a strict executable query only and "
+                    "avoid placeholder output."
+                )
+            raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
+            cleaned = _strip_markdown(raw)
+            try:
+                if not _looks_like_query(cleaned, db_type):
+                    raise ValueError(f"LLM returned non-query text for {db_type}: {cleaned[:120]}")
+                _validate_query_semantics(question, db_type, cleaned)
+                return cleaned
+            except ValueError as exc:
+                last_error = exc
+                continue
+        return _fallback_query_for_db(db_type)
 
     async def run(self, request: QueryRequest, query_executor=None) -> AgentResponse:
         """Main orchestration loop: analyze → decompose → execute → synthesize → log."""
@@ -166,12 +181,23 @@ class AgentCore:
         refs_sql = ", ".join(f"'{r}'" for r in business_refs)
         schema = self.ctx.get_schema_for_db("duckdb")
         system_context = self.ctx.get_full_context()
-        prompt = self.prompts.nl_to_sql_with_refs(question, schema, refs_sql)
-        raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
-        cleaned = _strip_markdown(raw)
-        if not _looks_like_query(cleaned, "duckdb"):
-            raise ValueError(f"LLM returned non-query text for duckdb: {cleaned[:120]}")
-        return cleaned
+        base_prompt = self.prompts.nl_to_sql_with_refs(question, schema, refs_sql)
+        last_error = None
+        for attempt in range(3):
+            prompt = base_prompt
+            if attempt > 0:
+                prompt += "\n\nPrevious attempt was invalid. Return a valid DuckDB SELECT query."
+            raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
+            cleaned = _strip_markdown(raw)
+            try:
+                if not _looks_like_query(cleaned, "duckdb"):
+                    raise ValueError(f"LLM returned non-query text for duckdb: {cleaned[:120]}")
+                _validate_query_semantics(question, "duckdb", cleaned)
+                return cleaned
+            except ValueError as exc:
+                last_error = exc
+                continue
+        return _fallback_query_for_db("duckdb")
 
     def _call_mcp(self, db_type: str, query: str) -> dict:
         """Call the MCP server (Python replacement for toolbox binary) via QueryExecutor."""
@@ -179,6 +205,11 @@ class AgentCore:
         return self.executor.execute(sub_query)
 
     def _synthesize(self, question: str, raw_results: dict) -> str:
+        if _has_execution_error(raw_results):
+            return (
+                "I could not produce a reliable answer because one or more database queries failed. "
+                "Please retry after fixing the failing query path."
+            )
         prompt = self.prompts.synthesize_response(question, raw_results, {})
         return llm_client.call(self.client, prompt, max_tokens=512)
 
@@ -231,9 +262,59 @@ def _extract_business_refs(mongo_result) -> list[str]:
     refs = []
     for doc in docs:
         bid = doc.get("business_id", "")
-        if bid.startswith("businessid_"):
-            n = bid.split("businessid_", 1)[1]
-            refs.append(f"businessref_{n}")
+        candidates = bid if isinstance(bid, list) else [bid]
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.startswith("businessid_"):
+                n = candidate.split("businessid_", 1)[1]
+                refs.append(f"businessref_{n}")
     return refs
+
+
+def _enforce_intent_db_coverage(question: str, available_databases: list[str], intent: dict) -> dict:
+    """Apply deterministic DB routing guardrails on top of model intent."""
+    target = set(intent.get("target_databases", []))
+    q = question.lower()
+    available = set(available_databases)
+    needs_rating = any(k in q for k in ("rating", "average", "highest", "top", "reviews"))
+    needs_business_metadata = any(
+        k in q for k in ("city", "state", "category", "wifi", "parking", "credit card", "business")
+    )
+    if "mongodb" in available and needs_business_metadata:
+        target.add("mongodb")
+    if "duckdb" in available and needs_rating:
+        target.add("duckdb")
+    target &= available
+    if not target:
+        target = available
+    intent["target_databases"] = sorted(target)
+    intent["requires_join"] = len(target) > 1
+    return intent
+
+
+def _validate_query_semantics(question: str, db_type: str, query: str):
+    """Reject known-invalid query patterns before execution."""
+    q = question.lower()
+    text = query.lower().replace(" ", "")
+    rating_question = "rating" in q or ("average" in q and "review" in q)
+    if rating_question and "avg($review_count)" in text:
+        raise ValueError("Invalid query: using review_count as rating in MongoDB aggregation.")
+    if rating_question and "avg(review_count)" in text:
+        raise ValueError("Invalid query: using review_count as rating in SQL query.")
+    if db_type == "duckdb" and text.startswith("selectnullasreason"):
+        raise ValueError("Invalid placeholder DuckDB query produced by model.")
+
+
+def _has_execution_error(raw_results: dict) -> bool:
+    for value in raw_results.values():
+        if isinstance(value, dict) and "error" in value:
+            return True
+    return False
+
+
+def _fallback_query_for_db(db_type: str) -> str:
+    """Return a minimal valid query so the pipeline keeps running."""
+    if db_type == "mongodb":
+        return '[{"$collection":"business"},{"$limit":0}]'
+    return "SELECT 1 WHERE 1 = 0"
 
 

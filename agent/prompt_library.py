@@ -10,6 +10,12 @@ Consult the domain knowledge in your context for any ambiguous terms or fiscal/s
 Question: {question}
 Available databases: {', '.join(available_databases)}
 
+Routing requirements:
+- If a question needs business attributes/metadata (city, state, category, wifi, parking, credit-card flags), include "mongodb".
+- If a question needs ratings, review-level dates, user registration dates, or SQL aggregation over review/user tables, include "duckdb".
+- For Yelp questions that ask for averages/maximum/top over reviews or ratings, include BOTH mongodb and duckdb and set requires_join=true.
+- Do not drop an available database when it is needed for correctness.
+
 Respond with valid JSON only:
 {{
   "target_databases": ["postgresql", "mongodb"],
@@ -29,6 +35,8 @@ Question: {question}
 Rules:
 - Return only the SQL query, no explanation
 - Use exact table and column names from the schema
+- Do NOT treat review_count as a rating value
+- If the question asks for rating/average rating, use an actual rating column/field from schema (never review_count)
 - For {dialect}: {self._dialect_rules(dialect)}"""
 
     def nl_to_mongodb(self, question: str, collection_schema: str) -> str:
@@ -53,6 +61,10 @@ CRITICAL REQUIREMENTS:
    {{"$match": {{"description": {{"$regex": "CityName", "$options": "i"}}}}}}
    Do NOT use $regexFind for simple city matching.
 
+4. Never use `review_count` as a substitute for rating.
+   - It is acceptable to aggregate review_count only when the question asks for number/count of reviews.
+   - For average/best rating questions, return business_ids needed for DuckDB rating computation.
+
 Example output:
 [{{"$collection": "business"}}, {{"$match": {{"is_open": 1}}}}, {{"$project": {{"business_id": 1, "name": 1}}}}]
 
@@ -73,6 +85,7 @@ Rules:
 - Use business_ref IN (...) as the primary filter — do not search by text or location
 - Return only the SQL query, no explanation
 - Use exact column names from the schema
+- If computing ratings, only use rating fields from schema (never review_count)
 - For DuckDB: {self._dialect_rules(dialect)}"""
 
     def self_correct(self, question: str, failed_query: str, error: str,
@@ -102,6 +115,7 @@ Results from databases:
 Rules:
 - Answer the question directly in 1-3 sentences
 - Include specific numbers/values from the results
+- If a required database result is missing or has an error, say the answer is unavailable due to execution failure; do not guess.
 - Keep the key entity (state name, business name, category) and its associated number WITHIN 40 CHARACTERS of each other. Example: "Pennsylvania (PA) - avg rating 3.70, highest reviews." NOT "Pennsylvania has many reviews. Its average rating is 3.70."
 - For state-based answers: format as "STATE_ABBR (State Name) - VALUE" e.g. "PA (Pennsylvania) - avg 3.48, 8 businesses."
 - If the question asks for a ranking or "which X", state X and its value together in the first 15 words
