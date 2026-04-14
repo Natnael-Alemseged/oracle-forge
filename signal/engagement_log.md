@@ -9,19 +9,19 @@
 ## Week 8
 
 ### Posts and Threads
-
+<!-- 
 | Date | Platform | Type | Title / Description | Link | Reach (if available) | Notable Responses |
 |------|----------|------|--------------------|----|----------------------|-------------------|
 | 2026-04-08 | X (Twitter) | Thread | First X thread — comment on Claude Code architecture post, specific observation from KB study on three-layer memory system | [PENDING] | — | — |
 | 2026-04-10 | Slack (internal) | Daily post | Day 3 internal update: infrastructure status, first DAB database loaded, MCP Toolbox configured | Internal only | — | — |
 | 2026-04-10 | Reddit | Comment | Substantive comment on r/MachineLearning post about enterprise data agents | [PENDING] | — | — |
-| 2026-04-11 | X (Twitter) | Thread | Second X thread — what the team is building: DAB benchmark, multi-database architecture decision, first unexpected result from Yelp dataset loading | [PENDING] | — | — |
+| 2026-04-11 | X (Twitter) | Thread | Second X thread — what the team is building: DAB benchmark, multi-database architecture decision, first unexpected result from Yelp dataset loading | [PENDING] | — | — | -->
 
 ## X Threads
 | Date | Link | Topic | Replies | Impressions |
 |------|------|-------|---------|-------------|
 | Apr 10 |https://x.com/i/status/2042340294788571217| DAB 38% ceiling — context engineering problem | 1 | 85 |
-Apr 11 | https://x.com/melakuG21193/status/2043604628030226886 | Claude Code 3-layer memory architecture applied to data agents | 0 | TBD |
+Apr 13 | https://x.com/melakuG21193/status/2043604628030226886 | Claude Code 3-layer memory architecture applied to data agents | TBD | TBD |
 ## Reddit
 | Date | Platform | Link | Upvotes | Notable replies |
 |------|----------|------|---------|----------------|
@@ -33,9 +33,12 @@ Apr 11 | https://x.com/melakuG21193/status/2043604628030226886 | Claude Code 3-l
 
 | Date | Source | Finding | Action taken |
 |------|--------|---------|--------------|
-| Apr 10 | X reply | Engineer noted that dialect translation debt compounds fast when teams pick specialized DBs per use case — agents inherit silo decisions with no context of why the split exists | Bring to mob session — relevant to how Drivers architect cross-DB routing and what IOs should document in KB v2 domain layer |
-| Apr 11 | r/MachineLearning comment | Developer questioning pass@k as a meaningful metric — building Bayesian benchmarking alternative (bayesbench). Key insight: systematic failures (0% across all trials) can't be resolved by more sampling — supports DAB's finding that bottleneck is planning not variance |
+| Apr 10 | X reply | Engineer noted that dialect translation debt compounds fast when teams pick specialized DBs per use case — agents inherit silo decisions with no context of why the split exists | suggested action is provided to both IOs and Drivers as per the finding |
+| Apr 11 | r/MachineLearning comment | Developer questioning pass@k as a meaningful metric — building Bayesian benchmarking alternative (bayesbench). Key insight: systematic failures (0% across all trials) can't be resolved by more sampling — supports DAB's finding that bottleneck is planning not variance | suggested action is provided to both IOs and Drivers as per the finding
+| Apr 14 | r/LocalLLaMA comment 1 | Another team building against DAB using resolver utility + result set size validation to catch silent join failures. Also wiring LLM-based extraction pipeline for unstructured fields — believes patents 0% is fixable with this approach | Bring to mob session — validate our join key resolver design against theirs. Ask IOs to document result set validation in KB v2 |
+| Apr 14 | r/LocalLLaMA comment 2 | Developer noted baseline DAB agents had no live schema relationship tool — were planning blind from natural language descriptions. Agents spending ~20% on exploration still couldn't see table relationships | Bring to mob session — schema introspection before planning is a confirmed gap. Drivers should prioritise this in agent design |
 
+Bring both to mob session:
 ### Resource Acquisitions
 
 | Resource | Application Date | Outcome | Instructions for Team |
