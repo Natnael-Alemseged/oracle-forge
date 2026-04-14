@@ -36,7 +36,11 @@ class AgentCore:
         """Break multi-DB intent into one SubQuery per target database."""
         sub_queries = []
         for db_type in intent.get("target_databases", []):
-            query = self._generate_query_for_db(question, db_type, intent)
+            try:
+                query = self._generate_query_for_db(question, db_type, intent)
+            except ValueError as e:
+                # Isolate per-DB generation failure; executor will record the error result
+                query = f"/* GENERATION_FAILED: {e} */"
             sub_queries.append(SubQuery(
                 database_type=db_type,
                 query=query,
@@ -56,10 +60,10 @@ class AgentCore:
         last_error = None
         for attempt in range(3):
             prompt = base_prompt
-            if attempt > 0:
+            if attempt > 0 and last_error:
                 prompt += (
-                    "\n\nPrevious attempt was invalid. Return a strict executable query only and "
-                    "avoid placeholder output."
+                    f"\n\nPrevious attempt was rejected: {last_error}. "
+                    f"Fix the issue and return only a valid {db_type} query."
                 )
             raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
             cleaned = _strip_markdown(raw)
@@ -71,7 +75,9 @@ class AgentCore:
             except ValueError as exc:
                 last_error = exc
                 continue
-        return _fallback_query_for_db(db_type)
+        raise ValueError(
+            f"Could not generate a valid {db_type} query after 3 attempts. Last error: {last_error}"
+        ) from last_error
 
     async def run(self, request: QueryRequest, query_executor=None) -> AgentResponse:
         """Main orchestration loop: analyze → decompose → execute → synthesize → log."""
@@ -188,8 +194,11 @@ class AgentCore:
         last_error = None
         for attempt in range(3):
             prompt = base_prompt
-            if attempt > 0:
-                prompt += "\n\nPrevious attempt was invalid. Return a valid DuckDB SELECT query."
+            if attempt > 0 and last_error:
+                prompt += (
+                    f"\n\nPrevious attempt was rejected: {last_error}. "
+                    "Fix the issue and return only a valid DuckDB SELECT query."
+                )
             raw = llm_client.call(self.client, prompt, system=system_context, max_tokens=512)
             cleaned = _strip_markdown(raw)
             try:
@@ -200,7 +209,9 @@ class AgentCore:
             except ValueError as exc:
                 last_error = exc
                 continue
-        return _fallback_query_for_db("duckdb")
+        raise ValueError(
+            f"Could not generate a valid duckdb query after 3 attempts. Last error: {last_error}"
+        ) from last_error
 
     def _call_mcp(self, db_type: str, query: str) -> dict:
         """Call the MCP server (Python replacement for toolbox binary) via QueryExecutor."""
