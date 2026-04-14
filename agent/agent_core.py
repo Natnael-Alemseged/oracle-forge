@@ -164,12 +164,15 @@ class AgentCore:
                     "corrected_query": corrected,
                     "error": error_str,
                 })
-                self.ctx.append_correction(
-                    query=original_question,
-                    what_went_wrong=error_str,
-                    correct_approach=corrected,
-                    failure_category=failure_type,
-                )
+                try:
+                    self.ctx.append_correction(
+                        query=original_question,
+                        what_went_wrong=error_str,
+                        correct_approach=corrected,
+                        failure_category=failure_type,
+                    )
+                except OSError:
+                    pass  # never let corrections I/O crash a query
                 current_query = corrected
 
         return {"error": "max retries exceeded"}, corrections
