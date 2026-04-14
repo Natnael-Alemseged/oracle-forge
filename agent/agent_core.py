@@ -90,6 +90,16 @@ class AgentCore:
 
         join_direction = intent.get("join_direction", "mongodb_first")
 
+        q_lower_check = request.question.lower()
+        # State aggregation always requires MongoDB data (attribute filter + description for state).
+        # Override any duckdb_first direction the LLM may have chosen for state questions.
+        if _is_state_aggregation_question(q_lower_check):
+            join_direction = "mongodb_first"
+        # User-based category questions (e.g. "categories most reviewed by users registered in YEAR")
+        # require DuckDB first to identify business_refs from user/review tables.
+        elif _is_user_category_question(q_lower_check):
+            join_direction = "duckdb_first"
+
         if mongo_sq and duck_sq and join_direction == "duckdb_first":
             # DuckDB-first join: run DuckDB first to find top business_refs,
             # then look up MongoDB for names/categories.
@@ -132,30 +142,93 @@ class AgentCore:
         elif mongo_sq and duck_sq:
             # MongoDB-first join: run MongoDB first, translate business_ids → business_refs,
             # regenerate DuckDB query filtered to exactly those refs.
-            # For category questions, force MongoDB to return individual docs (no $group)
-            if "categor" in request.question.lower():
-                mongo_sq = _strip_category_grouping(mongo_sq)
+            q_lower = request.question.lower()
+
+            # For state questions, force MongoDB to return individual docs (no $group)
+            if _is_state_aggregation_question(q_lower):
+                mongo_sq = _strip_state_grouping(mongo_sq)
+
             mongo_result, mongo_corr = self._execute_with_retry(mongo_sq, request.question)
             raw_results["mongodb"] = mongo_result
             self_corrections.extend(mongo_corr)
 
             # For category-ranking questions, use Python extraction instead of MongoDB grouping
-            if "categor" in request.question.lower():
+            if "categor" in q_lower:
                 cat_refs, top_cat_name, top_cat_count = _compute_top_category_refs(mongo_result)
                 if cat_refs:
                     business_refs = cat_refs
-                    # Add top category info to mongo_result for synthesizer context
-                    if isinstance(mongo_result, list):
-                        raw_results["mongodb"] = {
-                            "top_category": top_cat_name,
-                            "business_count": top_cat_count,
-                            "category_analysis": "Python-extracted from descriptions",
-                        }
+                    raw_results["mongodb"] = {
+                        "top_category": top_cat_name,
+                        "business_count": top_cat_count,
+                        "category_analysis": "Python-extracted from descriptions",
+                    }
                     merge_operations.append(
                         f"python category analysis → {top_cat_name} ({top_cat_count} refs)"
                     )
                 else:
                     business_refs = _extract_business_refs(mongo_result)
+
+            elif _is_state_aggregation_question(q_lower):
+                # Python state aggregation — avoid unreliable MongoDB $addFields/$split
+                state_to_refs = _group_refs_by_state(mongo_result)
+
+                if _needs_review_count_for_state(q_lower):
+                    # "most reviews" question: need DuckDB counts to rank states
+                    all_refs = [r for refs in state_to_refs.values() for r in refs]
+                    refs_sql = ", ".join(f"'{r}'" for r in all_refs)
+                    count_sql = (
+                        f"SELECT business_ref, COUNT(*) AS review_count, "
+                        f"AVG(rating) AS avg_rating FROM review "
+                        f"WHERE business_ref IN ({refs_sql}) GROUP BY business_ref"
+                    )
+                    count_result = self._call_mcp("duckdb", count_sql)
+                    top_state, top_refs, review_count, avg_rating = (
+                        _compute_top_state_by_reviews(state_to_refs, count_result)
+                    )
+                    if top_state:
+                        raw_results["mongodb"] = {
+                            "top_state": top_state,
+                            "review_count": review_count,
+                        }
+                        raw_results["duckdb"] = {
+                            "avg_rating": round(avg_rating, 6),
+                            "review_count": review_count,
+                        }
+                        merge_operations.append(
+                            f"python state aggregation (reviews) → {top_state} "
+                            f"({review_count} reviews, avg {avg_rating:.4f})"
+                        )
+                        # Both results already set — skip normal DuckDB execution
+                        sub_queries = [mongo_sq if sq.database_type == "mongodb" else duck_sq
+                                       for sq in sub_queries]
+                        answer = self._synthesize(request.question, raw_results)
+                        trace = QueryTrace(
+                            timestamp=datetime.utcnow().isoformat(),
+                            sub_queries=sub_queries,
+                            databases_used=list(raw_results.keys()),
+                            self_corrections=self_corrections,
+                            raw_results=raw_results,
+                            merge_operations=merge_operations,
+                        )
+                        response = AgentResponse(answer=answer, query_trace=trace, confidence=0.8)
+                        self._log_run(request, response, intent, sub_queries, self_corrections)
+                        self.ctx.add_to_session(request.question, answer[:200])
+                        return response
+                else:
+                    # "most businesses with attribute X per state" — just count MongoDB docs
+                    if state_to_refs:
+                        top_state = max(state_to_refs, key=lambda s: len(state_to_refs[s]))
+                        business_refs = state_to_refs[top_state]
+                        raw_results["mongodb"] = {
+                            "top_state": top_state,
+                            "business_count": len(business_refs),
+                        }
+                        merge_operations.append(
+                            f"python state aggregation (count) → {top_state} "
+                            f"({len(business_refs)} businesses)"
+                        )
+                    else:
+                        business_refs = _extract_business_refs(mongo_result)
             else:
                 business_refs = _extract_business_refs(mongo_result)
             if business_refs:
@@ -364,34 +437,6 @@ _CAT_EXTRACT_PATTERNS = [
 ]
 
 
-def _strip_category_grouping(mongo_sq: "SubQuery") -> "SubQuery":
-    """If the MongoDB pipeline groups by categories (unreliable), replace with a simple
-    filter+project so Python can do category extraction and aggregation."""
-    try:
-        pipeline = json.loads(mongo_sq.query)
-    except (json.JSONDecodeError, TypeError):
-        return mongo_sq
-
-    # Check if pipeline has $group (category aggregation done in MongoDB)
-    has_group = any("$group" in stage for stage in pipeline)
-    has_unwind = any("$unwind" in stage for stage in pipeline)
-    if not (has_group and has_unwind):
-        return mongo_sq  # No category grouping, keep as is
-
-    # Extract just the $collection and $match stages, add a simple $project
-    new_pipeline = []
-    for stage in pipeline:
-        if "$collection" in stage:
-            new_pipeline.append(stage)
-        elif "$match" in stage:
-            new_pipeline.append(stage)
-        elif "$addFields" in stage or "$group" in stage or "$unwind" in stage or "$sort" in stage or "$limit" in stage or "$project" in stage:
-            pass  # Skip category grouping stages
-    new_pipeline.append({"$project": {"business_id": 1, "description": 1}})
-
-    from agent.models import SubQuery
-    return SubQuery(database_type="mongodb", query=json.dumps(new_pipeline), intent=mongo_sq.intent)
-
 
 def _compute_top_category_refs(mongo_result) -> tuple[list[str], str, int]:
     """From a list of business docs with descriptions, find the top category by business count.
@@ -439,9 +484,8 @@ def _extract_categories_from_description(desc: str) -> list[str]:
                 c = c.strip().title()               # normalize to Title Case
                 if c:
                     cats.append(c)
-            # Only keep short category-like strings (no location words, verbs, or articles)
-            filtered = [c for c in cats if c and 2 <= len(c) <= 40
-                        and not re.search(r'\b(Offering|Array|Delightful|Perfect|Cozy|Wide|Range|Diverse|Menu|Cuisine|Atmosphere|Options|Experience|Selection|Establishment|Facility|Located|Services|Along|Lively|Vibrant|Great|Broad)\b', c)
+            # Filter out structural noise: 2-letter state codes, street addresses, numbers
+            filtered = [c for c in cats if c and 2 <= len(c) <= 50
                         and not re.match(r'^[A-Z]{2}$', c)  # skip 2-letter state codes
                         and not re.search(r'\b(St\.|Dr\.|Ave|Blvd|Rd|Hwy)\b', c)
                         and not re.search(r'\d', c)]  # skip strings with numbers (addresses)
@@ -537,4 +581,125 @@ def _extract_business_refs(mongo_result) -> list[str]:
     seen = set()
     return [r for r in refs if not (r in seen or seen.add(r))]
 
+
+# ── State aggregation helpers ──────────────────────────────────────────────────
+
+def _is_state_aggregation_question(q_lower: str) -> bool:
+    """True when the question asks which state has the most of something."""
+    return "state" in q_lower and ("highest" in q_lower or "most" in q_lower)
+
+
+def _is_user_category_question(q_lower: str) -> bool:
+    """True when question asks about categories reviewed by users filtered by registration/activity.
+    These require DuckDB first (user/review tables) then MongoDB category lookup."""
+    has_user_filter = "registered" in q_lower or "yelping since" in q_lower or "joined" in q_lower
+    return "categor" in q_lower and has_user_filter
+
+
+def _needs_review_count_for_state(q_lower: str) -> bool:
+    """True when ranking states by review count (not by business count)."""
+    return "review" in q_lower and _is_state_aggregation_question(q_lower)
+
+
+def _extract_state_from_description(desc: str) -> str:
+    """Extract 2-letter US state code from a business description.
+
+    Handles both address formats found in the dataset:
+      '...in City, XX, ...'   →  standard address with trailing comma
+      '...City, XX location...' →  Uber-style without trailing comma
+    """
+    m = re.search(r',\s*([A-Z]{2})(?:,| )', desc)
+    return m.group(1) if m else ""
+
+
+def _group_refs_by_state(mongo_result) -> dict[str, list[str]]:
+    """Build {state_code: [businessref_N, ...]} from MongoDB result docs."""
+    docs = mongo_result if isinstance(mongo_result, list) else mongo_result.get("rows", [])
+    state_to_refs: dict[str, list[str]] = defaultdict(list)
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        bid = doc.get("business_id", "")
+        if not bid.startswith("businessid_"):
+            continue
+        bref = bid.replace("businessid_", "businessref_")
+        state = _extract_state_from_description(doc.get("description", ""))
+        if state:
+            state_to_refs[state].append(bref)
+    return dict(state_to_refs)
+
+
+def _strip_state_grouping(mongo_sq: "SubQuery") -> "SubQuery":
+    """Remove unreliable $addFields/$group/$sort/$limit stages used to aggregate by state.
+    Keeps only $collection, $match (attribute filter), and adds a plain $project."""
+    try:
+        pipeline = json.loads(mongo_sq.query)
+    except (json.JSONDecodeError, TypeError):
+        return mongo_sq
+
+    has_addfields = any("$addFields" in stage for stage in pipeline)
+    has_group = any("$group" in stage for stage in pipeline)
+    if not (has_addfields or has_group):
+        return mongo_sq  # nothing to strip
+
+    new_pipeline = []
+    for stage in pipeline:
+        if "$collection" in stage or "$match" in stage:
+            new_pipeline.append(stage)
+        # Drop $addFields, $group, $sort, $limit, $project — replaced below
+    new_pipeline.append({"$project": {"business_id": 1, "description": 1}})
+
+    from agent.models import SubQuery as _SubQuery
+    return _SubQuery(
+        database_type="mongodb",
+        query=json.dumps(new_pipeline),
+        intent=mongo_sq.intent,
+    )
+
+
+def _compute_top_state_by_reviews(
+    state_to_refs: dict[str, list[str]],
+    duck_count_result,
+) -> tuple[str, list[str], int, float]:
+    """Given a state→refs map and DuckDB per-business review counts,
+    find the state with the most total reviews and its weighted avg rating.
+
+    Returns: (top_state, refs_for_top_state, total_review_count, weighted_avg_rating)
+    """
+    rows = (
+        duck_count_result
+        if isinstance(duck_count_result, list)
+        else duck_count_result.get("rows", [])
+    )
+    # Build ref → (count, avg) from DuckDB result
+    ref_stats: dict[str, tuple[int, float]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ref = row.get("business_ref", "")
+        cnt = row.get("review_count", 0)
+        avg = row.get("avg_rating", 0.0)
+        if ref and cnt:
+            ref_stats[ref] = (int(cnt), float(avg))
+
+    # Sum reviews by state
+    state_review_count: dict[str, int] = {}
+    for state, refs in state_to_refs.items():
+        state_review_count[state] = sum(ref_stats.get(r, (0, 0))[0] for r in refs)
+
+    if not state_review_count:
+        return "", [], 0, 0.0
+
+    top_state = max(state_review_count, key=lambda s: state_review_count[s])
+    top_refs = state_to_refs[top_state]
+    total_cnt = state_review_count[top_state]
+
+    # Weighted average rating across all businesses in the top state
+    weight_sum = sum(
+        ref_stats[r][0] * ref_stats[r][1] for r in top_refs if r in ref_stats
+    )
+    total_weight = sum(ref_stats[r][0] for r in top_refs if r in ref_stats)
+    avg_rating = weight_sum / total_weight if total_weight else 0.0
+
+    return top_state, top_refs, total_cnt, avg_rating
 

@@ -21,6 +21,8 @@ CRITICAL ROUTING RULES for Yelp dataset:
 JOIN DIRECTION RULES:
 - Use "mongodb_first" when: MongoDB's attribute/location filter is the main discriminator
   (e.g., "businesses with WiFi in PA" → MongoDB filters, DuckDB computes avg rating)
+  ALWAYS use "mongodb_first" for "which state has the most X" questions — state extraction
+  requires reading MongoDB description text, which Python post-processes. DuckDB cannot group by state.
 - Use "duckdb_first" when: DuckDB's time/rating data is the main discriminator
   (e.g., "highest rated business in date range" → DuckDB finds top business, MongoDB looks up name/category)
   (e.g., "categories most reviewed by 2016 users" → DuckDB finds business_refs for 2016 users, MongoDB looks up categories)
@@ -113,7 +115,15 @@ CRITICAL REQUIREMENTS:
    where XX is the 2-letter state abbreviation (e.g. ", PA(?:,| )" for Pennsylvania).
    This handles both ", PA," (standard address) and ", PA " (e.g. "Philadelphia, PA location").
 
-8. NEVER use $lookup to join with any other collection to filter by date/year.
+8. NEVER use $addFields/$group to extract or aggregate by state/city from the description field.
+   State names are embedded in description text in inconsistent formats — MongoDB string parsing
+   is unreliable. Instead: filter by attribute if needed, then return business_id + description
+   for each document. State aggregation (counting businesses per state, finding top state) is done
+   in post-processing by Python. Just return all matching docs with business_id and description.
+   WRONG: {{"$addFields": {{"state": {{"$arrayElemAt": [{{"$split": ["$description", "in "]}}, 1]}}}}}}
+   CORRECT: {{"$project": {{"business_id": 1, "description": 1}}}}
+
+9. NEVER use $lookup to join with any other collection to filter by date/year.
    Date filtering (e.g. "during 2018", "in 2016") is handled by DuckDB on the review table.
    MongoDB only handles attribute/location filters. Return business_ids and let DuckDB apply the date filter.
    WRONG: {{"$lookup": {{"from": "checkin", ...}}}}  ← never do this for review-date questions
@@ -191,14 +201,14 @@ Fix the query. Return only the corrected query, no explanation."""
         if cat_agg:
             cat_section = f"\n\nPRE-COMPUTED category_aggregation (use this directly):\n{json.dumps(cat_agg, indent=2)}"
 
-        # Truncate MongoDB to 20 docs max so DuckDB results always fit in the context
+        # Truncate MongoDB to 100 docs max to keep context manageable
         truncated_results = {}
         for k, v in merged_results.items():
             if k == "category_aggregation":
                 continue
-            if k == "mongodb" and isinstance(v, list) and len(v) > 20:
-                truncated_results[k] = v[:20]
-                truncated_results["mongodb_note"] = f"(showing 20 of {len(v)} docs)"
+            if k == "mongodb" and isinstance(v, list) and len(v) > 100:
+                truncated_results[k] = v[:100]
+                truncated_results["mongodb_note"] = f"(showing 100 of {len(v)} docs)"
             else:
                 truncated_results[k] = v
 
@@ -222,6 +232,8 @@ CRITICAL JOINING RULE:
 - When DuckDB returns avg_rating without a state/name column, it applies to the group identified by MongoDB
 - NEVER say "not available" for a metric if DuckDB returned a numeric value — associate it with the MongoDB entity
 - business_ref_N in DuckDB corresponds to business_id_N in MongoDB (e.g., businessref_9 ↔ businessid_9)
+- If MongoDB result contains "top_state", that IS the answer state — use it directly with the DuckDB metric
+- If DuckDB result contains "avg_rating" and "review_count" at the top level, those are the final pre-computed values
 
 CATEGORY AGGREGATION RULE:
 - If results contain a "category_aggregation" key, use it directly — it's already computed.
@@ -234,11 +246,11 @@ CATEGORY AGGREGATION RULE:
 CRITICAL FORMAT RULES (required for automated evaluation):
 - For state/entity + metric answers: ALWAYS use the compact format:
   "ABBR (Full Name) - avg RATING, N items."
-  Example: "PA (Pennsylvania) - avg 3.48, 8 WiFi businesses."
-  Example: "PA (Pennsylvania) - avg 3.70, 26 reviews."
-  The metric (e.g., 3.48) MUST appear within the FIRST 40 characters of the state abbreviation.
+  Example: "CA (California) - avg 4.12, 5 WiFi businesses."
+  Example: "TX (Texas) - avg 3.91, 14 reviews."
+  The metric (e.g., 4.12) MUST appear within the FIRST 40 characters of the state abbreviation.
 - For business name + category answers: name first, then categories in same sentence.
-  Example: "Coffee House Too Cafe belongs to: Restaurants, Breakfast & Brunch, American (New), Cafes."
+  Example: "Sunset Grill belongs to: Restaurants, American (New), Cafes."
 - For count-only answers: state the number prominently in the first sentence.
 - Do NOT write "has the highest number of X. The average rating is Y" — keep entity and metric together.
 - Do not mention internal query details (business_ref, business_id, etc.)
