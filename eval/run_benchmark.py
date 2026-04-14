@@ -19,12 +19,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
+from agent.agent_core import AgentCore
+from agent.context_manager import ContextManager
 from agent.models import QueryRequest
 from agent.prompt_library import PromptLibrary
-from agent.context_manager import ContextManager
-from agent.agent_core import AgentCore
+
+load_dotenv()
 
 def _resolve_dab_root() -> Path:
     """
@@ -175,7 +175,9 @@ async def main():
             else:
                 ok, reason = False, "no validate.py"
 
-            trial_results.append({"trial": trial + 1, "answer": answer, "passed": ok, "reason": reason})
+            trial_results.append(
+                {"trial": trial + 1, "answer": answer, "passed": ok, "reason": reason}
+            )
             total += 1
             if ok:
                 passed += 1
