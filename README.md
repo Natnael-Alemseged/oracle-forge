@@ -238,6 +238,19 @@ curl -X POST https://<tunnel-url>/query \
   -d '{"question": "What are the top 5 rated businesses?", "dataset": "yelp"}'
 ```
 
+**Alternative request format (Swagger-style):**
+```bash
+curl -X 'POST' \
+  'https://<tunnel-url>/query' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "question": "What is the average rating of all businesses located in Indianapolis, Indiana?",
+  "dataset": "yelp",
+  "session_id": "string"
+}'
+```
+
 **Example response:**
 ```json
 {
