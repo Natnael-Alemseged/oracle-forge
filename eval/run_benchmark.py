@@ -19,14 +19,51 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
+from agent.agent_core import AgentCore
+from agent.context_manager import ContextManager
 from agent.models import QueryRequest
 from agent.prompt_library import PromptLibrary
-from agent.context_manager import ContextManager
-from agent.agent_core import AgentCore
 
-DAB_ROOT = Path(os.getenv("DAB_ROOT", "/home/yakob/oracle-forge/DataAgentBench"))
+load_dotenv()
+
+
+def _resolve_dab_root() -> Path:
+    """
+    Resolve a readable DataAgentBench root path.
+
+    Priority:
+    1) DAB_ROOT from environment
+    2) ~/DataAgentBench
+    3) ../DataAgentBench relative to project root
+    """
+    env_root = os.getenv("DAB_ROOT")
+    candidates = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+
+    project_root = Path(__file__).resolve().parents[1]
+    candidates.extend([
+        Path.home() / "DataAgentBench",
+        project_root.parent / "DataAgentBench",
+    ])
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and os.access(candidate, os.R_OK | os.X_OK):
+                return candidate
+        except PermissionError:
+            continue
+
+    checked = ", ".join(str(p) for p in candidates)
+    raise RuntimeError(
+        "Could not locate a readable DataAgentBench directory. "
+        f"Checked: {checked}. "
+        "Set DAB_ROOT to a readable path, e.g. "
+        f"DAB_ROOT={Path.home() / 'DataAgentBench'}."
+    )
+
+
+DAB_ROOT = _resolve_dab_root()
 
 AGENT_MD    = "agent/AGENT.md"
 CORRECTIONS = "kb/corrections/corrections_log.md"
@@ -48,8 +85,28 @@ def load_validate(query_dir: Path):
 
 def load_queries(dataset: str) -> list[dict]:
     dataset_dir = DAB_ROOT / f"query_{dataset}"
+    if not dataset_dir.exists():
+        raise RuntimeError(
+            f"Dataset directory not found: {dataset_dir}. "
+            "Verify DAB_ROOT points to your DataAgentBench clone."
+        )
+    if not os.access(dataset_dir, os.R_OK | os.X_OK):
+        raise PermissionError(
+            f"Dataset directory is not readable: {dataset_dir}. "
+            "Fix permissions or point DAB_ROOT to a readable clone."
+        )
+
     queries = []
-    for query_dir in sorted(dataset_dir.glob("query[0-9]*")):
+    try:
+        query_dirs = sorted(dataset_dir.glob("query[0-9]*"))
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Cannot enumerate queries under {dataset_dir}. "
+            "Grant read+execute permissions on this directory tree, or set "
+            "DAB_ROOT to a location readable by the current user."
+        ) from exc
+
+    for query_dir in query_dirs:
         query_file = query_dir / "query.json"
         if not query_file.exists():
             continue
@@ -128,7 +185,9 @@ async def main():
             else:
                 ok, reason = False, "no validate.py"
 
-            trial_results.append({"trial": trial + 1, "answer": answer, "passed": ok, "reason": reason})
+            trial_results.append(
+                {"trial": trial + 1, "answer": answer, "passed": ok, "reason": reason}
+            )
             total += 1
             if ok:
                 passed += 1
