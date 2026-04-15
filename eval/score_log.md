@@ -99,3 +99,10 @@ python eval/score.py --results eval/run_logs/benchmark_yelp_<timestamp>.json
 | 20260415_153918 | yelp | 5/7 | 71% | query-pass@1 | — |
 | 20260415_154108 | yelp | 5/7 | 71% | query-pass@1 | — |
 | 20260415_154208 | bookreview | 3/3 | 100% | query-pass@1 | — |
+| 20260415_162300 | yelp | 5/7 | 71% | query-pass@1 | — |
+| 20260415_162649 | yelp | 4/7 | 57% | query-pass@1 | — |
+| 20260415_162955 | yelp | 5/7 | 71% | query-pass@1 | — |
+| 20260415_163317 | yelp | 7/7 | 100% | query-pass@1 | — |
+| 20260415_163356 | bookreview | 3/3 | 100% | query-pass@1 | — |
+| 20260415_163833 | yelp | 6/7 | 86% | query-pass@1 | — |
+| 20260415_163944 | bookreview | 3/3 | 100% | query-pass@1 | — |

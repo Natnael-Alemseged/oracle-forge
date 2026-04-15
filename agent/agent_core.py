@@ -56,8 +56,26 @@ class AgentCore:
                     query=_placeholder_query,
                     intent=intent.get("intent_summary", question),
                 ))
+            elif requires_join and join_direction == "duckdb_first" and db_type == "duckdb":
+                # Placeholder — DuckDB query will be generated/overridden in run() once
+                # the direction is confirmed and the correct template is chosen (e.g.
+                # deterministic user-category query). This prevents a LLM ValueError here
+                # from crashing the whole run before run() can apply the right override.
+                sub_queries.append(SubQuery(
+                    database_type=db_type,
+                    query="SELECT 1",
+                    intent=intent.get("intent_summary", question),
+                ))
             else:
-                query = self._generate_query_for_db(question, db_type, intent)
+                try:
+                    query = self._generate_query_for_db(question, db_type, intent)
+                except ValueError:
+                    # LLM returned unparseable output — use a safe no-op placeholder so
+                    # the run() orchestration can still decide what to do.
+                    query = "SELECT 1" if db_type != "mongodb" else (
+                        '[{"$collection": "business"}, '
+                        '{"$project": {"business_id": 1, "name": 1, "description": 1}}]'
+                    )
                 sub_queries.append(SubQuery(
                     database_type=db_type,
                     query=query,
@@ -109,10 +127,29 @@ class AgentCore:
             # DuckDB-first join: run DuckDB first to find top business_refs,
             # then look up MongoDB for names/categories.
 
+            # For user-category questions (e.g. "categories most reviewed by users
+            # registered in 2016"), generate a deterministic DuckDB query that groups
+            # by business_ref — NOT by category (categories live in MongoDB, not DuckDB).
+            if _is_user_category_question(request.question.lower()):
+                year_match = re.search(r'\b(20\d\d|19\d\d)\b', request.question)
+                year = year_match.group(1) if year_match else ""
+                year_filter = f"AND u.yelping_since LIKE '%{year}%'" if year else ""
+                user_cat_query = (
+                    "SELECT r.business_ref, COUNT(*) AS review_count "
+                    "FROM review r JOIN user u ON r.user_id = u.user_id "
+                    f"WHERE 1=1 {year_filter} "
+                    "GROUP BY r.business_ref ORDER BY review_count DESC"
+                )
+                duck_sq = SubQuery(
+                    database_type="duckdb",
+                    query=user_cat_query,
+                    intent=duck_sq.intent,
+                )
+
             # If the direction was overridden to duckdb_first AFTER decompose_query already
             # placed a SELECT 1 placeholder for DuckDB (because the LLM returned mongodb_first),
             # we need to regenerate a real DuckDB query now.
-            if duck_sq.query.strip().upper() == "SELECT 1":
+            elif duck_sq.query.strip().upper() == "SELECT 1":
                 try:
                     real_duck_query = self._generate_query_for_db(
                         request.question, "duckdb", intent
@@ -197,6 +234,22 @@ class AgentCore:
                 if _needs_review_count_for_state(q_lower):
                     # "most reviews" question: need DuckDB counts to rank states
                     all_refs = [r for refs in state_to_refs.values() for r in refs]
+                    if not all_refs:
+                        # MongoDB failed to return usable results — skip DuckDB and synthesize error
+                        raw_results["mongodb"] = {"error": "No state data returned from MongoDB"}
+                        answer = self._synthesize(request.question, raw_results)
+                        trace = QueryTrace(
+                            timestamp=datetime.utcnow().isoformat(),
+                            sub_queries=sub_queries,
+                            databases_used=list(raw_results.keys()),
+                            self_corrections=self_corrections,
+                            raw_results=raw_results,
+                            merge_operations=merge_operations,
+                        )
+                        response = AgentResponse(answer=answer, query_trace=trace, confidence=0.3)
+                        self._log_run(request, response, intent, sub_queries, self_corrections)
+                        self.ctx.add_to_session(request.question, answer[:200])
+                        return response
                     refs_sql = ", ".join(f"'{r}'" for r in all_refs)
                     count_sql = (
                         f"SELECT business_ref, COUNT(*) AS review_count, "
@@ -253,19 +306,44 @@ class AgentCore:
                         business_refs = _extract_business_refs(mongo_result)
             else:
                 business_refs = _extract_business_refs(mongo_result)
+            # True when Python has already resolved the group (top state or top category)
+            # and DuckDB only needs to compute a single AVG(rating) across those refs.
+            _needs_deterministic_avg = is_category_q or (
+                _is_state_aggregation_question(q_lower_check)
+                and not _needs_review_count_for_state(q_lower_check)
+                and ("average rating" in q_lower_check or "avg rating" in q_lower_check)
+            )
+
             if business_refs:
-                try:
-                    new_query = self._generate_duckdb_with_refs(
-                        request.question, intent, business_refs
+                if _needs_deterministic_avg:
+                    # Group already resolved by Python. DuckDB only needs AVG(rating).
+                    # Use a deterministic template — LLM can't accidentally emit COUNT/GROUP BY.
+                    refs_sql = ", ".join(f"'{r}'" for r in business_refs)
+                    avg_query = (
+                        f"SELECT AVG(rating) AS avg_rating "
+                        f"FROM review WHERE business_ref IN ({refs_sql})"
                     )
                     duck_sq = SubQuery(
                         database_type="duckdb",
-                        query=new_query,
+                        query=avg_query,
                         intent=duck_sq.intent,
                     )
                     merge_operations.append(
-                        f"mongo→duckdb join on {len(business_refs)} business_refs"
+                        f"deterministic avg_rating over {len(business_refs)} refs"
                     )
+                try:
+                    if not _needs_deterministic_avg:
+                        new_query = self._generate_duckdb_with_refs(
+                            request.question, intent, business_refs
+                        )
+                        duck_sq = SubQuery(
+                            database_type="duckdb",
+                            query=new_query,
+                            intent=duck_sq.intent,
+                        )
+                        merge_operations.append(
+                            f"mongo→duckdb join on {len(business_refs)} business_refs"
+                        )
                 except ValueError:
                     # LLM returned non-query with refs — generate a plain DuckDB query
                     try:
@@ -668,7 +746,7 @@ def _tokenize_category_span(span: str) -> list[str]:
                     or re.match(r'^[A-Z]{2}$', frag)
                     or re.search(r'\b(St\.|Dr\.|Ave|Blvd|Rd|Hwy)\b', frag)
                     or re.search(r'\d', frag)
-                    or re.match(r'^(Options|Provides|Menu|Dishes|Items|Food|Needs)$',
+                    or re.match(r'^(Options|Provides|Menu|Dishes|Items|Needs)$',
                                 frag, re.IGNORECASE)):
                 continue
             cats.append(frag)
@@ -810,24 +888,39 @@ def _group_refs_by_state(mongo_result) -> dict[str, list[str]]:
     return dict(state_to_refs)
 
 
+_NONEXISTENT_MONGO_FIELDS = {"state", "city", "zip", "zipcode", "address", "country"}
+
+
 def _strip_state_grouping(mongo_sq: "SubQuery") -> "SubQuery":
-    """Remove unreliable $addFields/$group/$sort/$limit stages used to aggregate by state.
-    Keeps only $collection, $match (attribute filter), and adds a plain $project."""
+    """Remove unreliable pipeline stages used to aggregate by state.
+
+    Always strips: $addFields, $group, $sort, $limit, $project (replaced with plain $project).
+    Also strips: $match stages that filter on fields that don't exist in the MongoDB schema
+    (e.g. 'state', 'city') — these silently return zero results.
+    """
     try:
         pipeline = json.loads(mongo_sq.query)
     except (json.JSONDecodeError, TypeError):
         return mongo_sq
 
+    def _is_phantom_match(stage: dict) -> bool:
+        """True if $match filters on a field that doesn't exist in MongoDB business docs."""
+        match_doc = stage.get("$match", {})
+        return bool(set(match_doc.keys()) & _NONEXISTENT_MONGO_FIELDS)
+
     has_addfields = any("$addFields" in stage for stage in pipeline)
     has_group = any("$group" in stage for stage in pipeline)
-    if not (has_addfields or has_group):
+    has_phantom = any("$match" in stage and _is_phantom_match(stage) for stage in pipeline)
+    if not (has_addfields or has_group or has_phantom):
         return mongo_sq  # nothing to strip
 
     new_pipeline = []
     for stage in pipeline:
-        if "$collection" in stage or "$match" in stage:
+        if "$collection" in stage:
             new_pipeline.append(stage)
-        # Drop $addFields, $group, $sort, $limit, $project — replaced below
+        elif "$match" in stage and not _is_phantom_match(stage):
+            new_pipeline.append(stage)
+        # Drop $addFields, $group, $sort, $limit, $project, and phantom $match — replaced below
     new_pipeline.append({"$project": {"business_id": 1, "description": 1}})
 
     from agent.models import SubQuery as _SubQuery
