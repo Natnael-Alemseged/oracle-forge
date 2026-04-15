@@ -50,6 +50,9 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | date | str (list joined) | "2011-03-18 21:32:32, 2011-07-03 19:19:32, ..." — comma-separated timestamps |
 
 ### DuckDB — Yelp user_database (yelp_user.db)
+**CRITICAL: The `business` table does NOT exist in DuckDB. It is a MongoDB collection.
+Never reference or JOIN `business` in any DuckDB/SQL query — it will always fail with "Table does not exist".**
+
 **Table: review** (~2000 rows)
 | Field | Type | Sample Values |
 |-------|------|---------------|
@@ -61,7 +64,7 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | funny | BIGINT | vote count |
 | cool | BIGINT | vote count |
 | text | VARCHAR | Free-text review content |
-| date | VARCHAR | "August 01, 2016 at 03:44 AM" — parse year with: EXTRACT(year FROM strptime(date, '%B %d, %Y at %I:%M %p')) or use LIKE '%2018%' |
+| date | VARCHAR | **MIXED FORMATS** — some rows use `"August 01, 2016 at 03:44 AM"`, others use `"21 May 2016, 18:48"`. NEVER call `strptime()` or `TRY_STRPTIME()` with a single format — it crashes on the other format. For year-only filters: `date LIKE '%2016%'`. For date-range filters: `COALESCE(TRY_STRPTIME(date, '%B %d, %Y at %I:%M %p'), TRY_STRPTIME(date, '%d %b %Y, %H:%M')) BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'` |
 
 **Table: tip** (~rows)
 | Field | Type | Sample Values |

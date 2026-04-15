@@ -543,6 +543,15 @@ def _compute_top_category_refs(mongo_result) -> tuple[list[str], str, int]:
     if not cat_to_refs:
         return [], "", 0
 
+    # Merge plural/singular pairs that both appear in the data
+    # (e.g. "Restaurant" + "Restaurants" → "Restaurant").
+    # Only triggers when BOTH forms exist — "Arts", "News", "Business" are safe.
+    for cat in list(cat_to_refs.keys()):
+        if cat.endswith("s") and len(cat) > 3:
+            singular = cat[:-1]
+            if singular in cat_to_refs:
+                cat_to_refs[singular].extend(cat_to_refs.pop(cat))
+
     # Find category with most businesses
     top_cat = max(cat_to_refs, key=lambda c: len(cat_to_refs[c]))
     return cat_to_refs[top_cat], top_cat, len(cat_to_refs[top_cat])

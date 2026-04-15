@@ -258,9 +258,13 @@ Return only valid JSON."""
             "sqlite": "use SQLite syntax, strftime('%Y', date_col) for year extraction, LIKE for text search",
             "duckdb": (
                 "use DuckDB analytical functions. "
-                "For date columns stored as VARCHAR with mixed formats, use LIKE '%YEAR%' for year-only filters. "
-                "For full date parsing use COALESCE(TRY_STRPTIME(col, fmt1), TRY_STRPTIME(col, fmt2)). "
-                "Consult the schema in your context for the exact date formats in the active dataset."
+                "review.date has MIXED formats: '%B %d, %Y at %I:%M %p' (e.g. 'August 01, 2016 at 03:44 AM') "
+                "OR '%d %b %Y, %H:%M' (e.g. '21 May 2016, 18:48'). "
+                "NEVER call STRPTIME/TRY_STRPTIME with a single format — it crashes for the other. "
+                "Year-only: use LIKE '%2016%'. "
+                "Date range: COALESCE(TRY_STRPTIME(date, '%B %d, %Y at %I:%M %p'), "
+                "TRY_STRPTIME(date, '%d %b %Y, %H:%M')) BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'. "
+                "The 'business' table does NOT exist in DuckDB — never JOIN it; it is MongoDB-only."
             ),
             "mongodb": "return a MongoDB aggregation pipeline as a JSON array",
         }
