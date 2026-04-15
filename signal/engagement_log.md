@@ -14,10 +14,10 @@
 
 | Date | Platform | Type | Title / Description | Link | Reach (if available) | Notable Responses |
 |------|----------|------|--------------------|----|----------------------|-------------------|
-| 2026-04-08 | X (Twitter) | Thread | First X thread — comment on Claude Code architecture post, specific observation from KB study on three-layer memory system | [PENDING] | — | — |
+| 2026-04-08 | X (Twitter) | Thread | First X thread — comment on Claude Code architecture post, specific observation from KB study on three-layer memory system | https://x.com/melakuG21193/status/2042340294788571217 | — | — |
 | 2026-04-10 | Slack (internal) | Daily post | Day 3 internal update: infrastructure status, first DAB database loaded, MCP Toolbox configured | Internal only | — | — |
-| 2026-04-10 | Reddit | Comment | Substantive comment on r/MachineLearning post about enterprise data agents | [PENDING] | — | — |
-| 2026-04-11 | X (Twitter) | Thread | Second X thread — what the team is building: DAB benchmark, multi-database architecture decision, first unexpected result from Yelp dataset loading | [PENDING] | — | — |
+| 2026-04-10 | X (Twitter) | Comment | Reply on Claude Code architecture post about enterprise data agents | https://x.com/rivestack/status/2042346968328835172 | — | — |
+| 2026-04-11 | X (Twitter) | Thread | Second X thread — what the team is building: DAB benchmark, multi-database architecture decision, first unexpected result from Yelp dataset loading | https://x.com/melakuG21193/status/2043604628030226886 | — | — |
 
 ## X Threads
 | Date | Link | Topic | Replies | Impressions |
@@ -42,7 +42,7 @@ Apr 11 | https://x.com/melakuG21193/status/2043604628030226886 | Claude Code 3-l
 
 | Resource | Application Date | Outcome | Instructions for Team |
 |----------|-----------------|---------|----------------------|
-| Cloudflare Workers free tier | 2026-04-07 | [PENDING — update with outcome] | [Add access instructions here once obtained] |
+| Cloudflare Workers free tier | 2026-04-07 | [PLACEHOLDER — replace with outcome] | [PLACEHOLDER — add access instructions once obtained] |
 | API credits (list any applied for) | — | — | — |
 
 
@@ -52,10 +52,10 @@ Apr 11 | https://x.com/melakuG21193/status/2043604628030226886 | Claude Code 3-l
 
 | Date | Platform | Type | Title / Description | Link | Reach (if available) | Notable Responses |
 |------|----------|------|--------------------|----|----------------------|-------------------|
-| 2026-04-14 | X (Twitter) | Thread | Benchmark submission thread — setup process, first scores, what the evaluation harness measures | [PENDING] | — | — |
-| 2026-04-15 | LinkedIn / Medium | Article | Signal Corps member 1 article (600–1000 words, one specific thing learned) | [PENDING] | — | — |
-| 2026-04-15 | LinkedIn / Medium | Article | Signal Corps member 2 article (600–1000 words, one failure understood) | [PENDING] | — | — |
-| 2026-04-17 | X (Twitter) | Thread | Final community thread — benchmark results, DAB leaderboard reference, DAB PR link | [PENDING] | — | — |
+| 2026-04-14 | X (Twitter) | Thread | Benchmark submission thread — setup process, first scores, what the evaluation harness measures | [PLACEHOLDER — replace with actual X link] | — | — |
+| 2026-04-15 | LinkedIn / Medium | Article | Signal Corps member 1 article (600–1000 words, one specific thing learned) | [PLACEHOLDER — replace with actual article link] | — | — |
+| 2026-04-15 | LinkedIn / Medium | Article | Signal Corps member 2 article (600–1000 words, one failure understood) | [PLACEHOLDER — replace with actual article link] | — | — |
+| 2026-04-17 | X (Twitter) | Thread | Final community thread — benchmark results, DAB leaderboard reference, DAB PR link | [PLACEHOLDER — replace with actual X link] | — | — |
 
 ### Community Intelligence
 

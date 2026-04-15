@@ -23,6 +23,9 @@
 
 The agent answers natural language questions by routing sub-queries across 4 database types, merging results, and producing a verifiable answer with a full query trace.
 
+![Architecture Diagram](docs/architecture_diagram.jpg)
+> *Photo of architecture diagram — replace `docs/architecture_diagram.jpg` with the actual committed image path.*
+
 ```
 User question
     ↓
@@ -127,7 +130,8 @@ oracle-forge/
 │   └── sprint_plan_driver2.md
 │
 ├── signal/                      # Signal Corps
-│   └── engagement_log.md        # Post links, community participation, resource acquisitions
+│   ├── engagement_log.md              # Original posts, X threads, resource acquisitions
+│   └── community_participation_log.md # Reddit/Discord/X replies and community comments
 │
 ├── requirements.txt
 └── README.md
