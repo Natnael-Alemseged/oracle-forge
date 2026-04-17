@@ -233,6 +233,83 @@ These mismatches will cause silent wrong answers if not handled:
 - Contract has NO OwnerId — to get the agent for a contract, join via `Opportunity.ContractID__c = Contract.Id` and use `Opportunity.OwnerId`.
 - **Cross-DB joins**: run each logical DB separately. Pass IDs from one result as an IN-list filter to the next query. Do NOT write a single SQL query that references tables from two different logical databases.
 
+### SQLite — deps_dev package_database (package_query.db)
+**DAB root:** `DataAgentBench/query_DEPS_DEV_V1/query_dataset/`
+
+**Table: packageinfo**
+| Field | Type | Notes |
+|-------|------|-------|
+| System | TEXT | "NPM", "Maven", "PyPI", "Go", "Cargo" — UPPERCASE |
+| Name | TEXT | package name |
+| Version | TEXT | version string |
+| Licenses | TEXT | JSON-like array e.g. `["MIT"]` — use LIKE for filtering |
+| VersionInfo | TEXT | JSON-like object — contains `"IsRelease": true/false` |
+| Links | TEXT | JSON array of URLs |
+| Advisories | TEXT | JSON array of security advisories |
+| DependenciesProcessed | INTEGER | 0 or 1 |
+| DependencyError | INTEGER | 0 or 1 |
+| UpstreamPublishedAt | REAL | Unix timestamp in milliseconds |
+
+**Critical rules:**
+- `System` is UPPERCASE — use `System = 'NPM'` not `'npm'`
+- For "release versions": filter `VersionInfo LIKE '%"IsRelease": true%'`
+- `Licenses` is a JSON string — use `Licenses LIKE '%MIT%'`
+- **NEVER try to extract stars, forks, or GitHub metrics from SQLite** — those are ONLY in DuckDB `project_info`
+- SQLite query should ONLY filter/return: Name, Version, System, Licenses, VersionInfo
+- For "top N by stars/forks" questions: SQLite just filters the pool; DuckDB ranks by stars/forks
+
+### DuckDB — deps_dev project_database (project_query.db)
+**Table: project_packageversion** (maps packages → GitHub projects)
+| Field | Type | Notes |
+|-------|------|-------|
+| System | VARCHAR | "NPM" etc. — joins to SQLite packageinfo.System |
+| Name | VARCHAR | package name — joins to SQLite packageinfo.Name |
+| Version | VARCHAR | version — joins to SQLite packageinfo.Version |
+| ProjectType | VARCHAR | "GITHUB", "GITLAB" |
+| ProjectName | VARCHAR | "owner/repo" e.g. "mui-org/material-ui" |
+| RelationProvenance | VARCHAR | provenance of relationship |
+| RelationType | VARCHAR | ONLY values: 'SOURCE_REPO_TYPE' or 'ISSUE_TRACKER_TYPE' — NOT for release filtering |
+
+**CRITICAL: RelationType is NOT "release" — never filter `RelationType = 'release'`. Release status is only in SQLite `VersionInfo LIKE '%"IsRelease": true%'`.**
+
+**Table: project_info** (GitHub project metadata — 770 rows)
+| Field | Type | Notes |
+|-------|------|-------|
+| Project_Information | TEXT | "The project owner/repo on GitHub has X stars, and Y forks." |
+| Licenses | TEXT | JSON-like array of licenses |
+| Description | TEXT | project description |
+| Homepage | TEXT | homepage URL |
+| OSSFuzz | REAL | OSSFuzz indicator |
+
+**CRITICAL: project_info has NO ProjectName column.** Join via regex-extracted name:
+```sql
+WITH project_names AS (
+  SELECT
+    -- MUST use owner/repo pattern (require slash) to avoid false positives like "project is hosted"
+    REGEXP_EXTRACT(Project_Information, 'project ([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)', 1) AS ProjectName,
+    CAST(REPLACE(COALESCE(
+      NULLIF(REGEXP_EXTRACT(Project_Information, '([\d,]+) stars', 1), ''),
+      NULLIF(REGEXP_EXTRACT(Project_Information, 'stars count of ([\d,]+)', 1), '')
+    ), ',', '') AS BIGINT) AS stars,
+    CAST(REPLACE(COALESCE(
+      NULLIF(REGEXP_EXTRACT(Project_Information, '([\d,]+) forks', 1), ''),
+      NULLIF(REGEXP_EXTRACT(Project_Information, 'forks count of ([\d,]+)', 1), ''),
+      NULLIF(REGEXP_EXTRACT(Project_Information, 'forked ([\d,]+) times', 1), '')
+    ), ',', '') AS BIGINT) AS forks
+  FROM project_info WHERE Project_Information IS NOT NULL
+)
+SELECT ppv.Name, ppv.Version, pn.stars, ppv.ProjectName
+FROM project_packageversion ppv
+JOIN project_names pn ON ppv.ProjectName = pn.ProjectName
+WHERE ppv.System = 'NPM' AND pn.stars IS NOT NULL
+ORDER BY pn.stars DESC LIMIT 10;  -- use 10 to cover duplicates/edge cases for "top 5" questions
+```
+- `packageinfo.Name` uses compound format: `"@dmrvos/infrajs>0.0.6>typescript"` — this IS the full Name field, not parsed
+- Cross-DB join: SQLite packageinfo → DuckDB project_packageversion on (System, Name, Version)
+- For MIT+release+forks queries: apply MIT filter in project_info.Licenses (`Licenses LIKE '%MIT%'`), GROUP BY ProjectName to deduplicate
+- For "top 5" questions: use LIMIT 10 in DuckDB so the LLM can select the actual top 5 — some packages share the same GitHub project
+- NEVER filter `RelationType='release'` — use SQLite VersionInfo for release status
+
 ## Behavioral Rules
 1. Always produce a query trace — never return an answer without it
 2. Self-correct on execution failure — retry up to 3 times with diagnosis

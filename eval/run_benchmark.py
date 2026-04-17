@@ -19,12 +19,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from agent.agent_core import AgentCore
 from agent.context_manager import ContextManager
 from agent.models import QueryRequest
 from agent.prompt_library import PromptLibrary
-
-load_dotenv()
 
 
 def _resolve_dab_root() -> Path:
@@ -75,6 +75,7 @@ DATASET_DBS = {
     "googlelocal":  ["postgresql", "sqlite"],
     "agnews":       ["mongodb", "sqlite"],
     "crmarenapro":  ["core_crm", "sales_pipeline", "support", "products_orders", "activities", "territory"],
+    "DEPS_DEV_V1":  ["package_database", "project_database"],
 }
 
 
