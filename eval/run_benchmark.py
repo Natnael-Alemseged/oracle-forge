@@ -26,6 +26,7 @@ from agent.prompt_library import PromptLibrary
 
 load_dotenv()
 
+
 def _resolve_dab_root() -> Path:
     """
     Resolve a readable DataAgentBench root path.
@@ -70,8 +71,9 @@ DOMAIN_KB   = "kb/domain/domain_terms.md"
 
 DATASET_DBS = {
     "yelp":       ["mongodb", "duckdb"],
-    "bookreview": ["postgresql", "sqlite"],
+    "bookreview": ["postgresql_bookreview", "sqlite"],
     "agnews":     ["mongodb", "sqlite"],
+    "GITHUB_REPOS": ["github_repos_metadata", "github_repos_artifacts"],
 }
 
 
@@ -96,7 +98,16 @@ def load_queries(dataset: str) -> list[dict]:
         )
 
     queries = []
-    for query_dir in sorted(dataset_dir.glob("query[0-9]*")):
+    try:
+        query_dirs = sorted(dataset_dir.glob("query[0-9]*"))
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Cannot enumerate queries under {dataset_dir}. "
+            "Grant read+execute permissions on this directory tree, or set "
+            "DAB_ROOT to a location readable by the current user."
+        ) from exc
+
+    for query_dir in query_dirs:
         query_file = query_dir / "query.json"
         if not query_file.exists():
             continue
@@ -199,9 +210,16 @@ async def main():
     # Summary
     pass_rate = passed / total if total else 0
     any_pass_count = sum(1 for r in results if r["any_pass"])
+    query_pass_rate = any_pass_count / len(queries) if queries else 0
     print("\n" + "=" * 60)
-    print(f"Results: {any_pass_count}/{len(queries)} queries passed")
-    print(f"Pass@{args.trials}: {pass_rate:.1%}  ({passed}/{total} individual trials)")
+    print(
+        f"Query-level pass@{args.trials}: {any_pass_count}/{len(queries)} "
+        f"({query_pass_rate:.1%})  — at least 1 trial passed"
+    )
+    print(
+        f"Trial-level pass rate:  {passed}/{total} "
+        f"({pass_rate:.1%})  — across all individual trials"
+    )
 
     # Write results JSON
     run_ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -224,8 +242,9 @@ async def main():
 
 
 def _update_score_log(dataset: str, passed: int, total: int, trials: int, ts: str):
+    # passed/total here is query-level (any_pass_count / total_queries)
     score_pct = f"{passed/total:.0%}" if total else "0%"
-    row = f"| {ts} | {dataset} | {passed}/{total} | {score_pct} | pass@{trials} | — |\n"
+    row = f"| {ts} | {dataset} | {passed}/{total} | {score_pct} | query-pass@{trials} | — |\n"
     log_path = "eval/score_log.md"
     with open(log_path, "a") as f:
         f.write(row)

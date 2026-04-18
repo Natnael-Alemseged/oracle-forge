@@ -21,7 +21,6 @@ Usage:
 import re
 from typing import Union
 
-
 # Registry of known format rules per database pair.
 # Key: (source_db, target_db) tuple.
 # Value: dict with prefix and optional zero-padding width.
@@ -29,7 +28,8 @@ from typing import Union
 # Document every entry in kb/domain/yelp_schema.md.
 FORMAT_REGISTRY: dict = {
     # Yelp dataset — CONFIRMED 2026-04-11 from schema_introspector.py against live data.
-    # MongoDB business.business_id = "businessid_N" → DuckDB review/tip.business_ref = "businessref_N"
+    # MongoDB business.business_id = "businessid_N" →
+    # DuckDB review/tip.business_ref = "businessref_N"
     # The numeric suffix N is identical. Only the prefix differs.
     # NOTE: The agent also resolves this inline in agent_core._extract_business_refs().
     # This registry is for manual use, testing, and future datasets.
@@ -86,7 +86,10 @@ def resolve_join_key(
     pad = rule.get("pad_width", 0)
 
     str_val = str(value)
-    suffix = str_val[len(source_prefix):] if str_val.startswith(source_prefix) else re.sub(r"\D", "", str_val)
+    if str_val.startswith(source_prefix):
+        suffix = str_val[len(source_prefix) :]
+    else:
+        suffix = re.sub(r"\D", "", str_val)
     if pad:
         suffix = suffix.zfill(pad)
     return f"{target_prefix}{suffix}"

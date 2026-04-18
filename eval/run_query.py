@@ -8,23 +8,16 @@ Usage:
     python eval/run_query.py --dataset yelp --question "Which users left the most reviews?"
 """
 import argparse
-import json
 import asyncio
-import os
+
 from dotenv import load_dotenv
 
-load_dotenv()
-
+from agent.agent_core import AgentCore
+from agent.context_manager import ContextManager
 from agent.models import QueryRequest
 from agent.prompt_library import PromptLibrary
-from agent.context_manager import ContextManager
-from agent.response_synthesizer import ResponseSynthesizer
-from agent.self_corrector import SelfCorrector
-from agent.database_router import DatabaseRouter
-from agent.query_executor import QueryExecutor
-from agent.state_manager import StateManager
-from agent.agent_core import AgentCore
-from agent import llm_client
+
+load_dotenv()
 
 # Paths relative to project root
 AGENT_MD   = "agent/AGENT.md"
@@ -36,6 +29,7 @@ DATASET_DBS = {
     "yelp":       ["mongodb", "duckdb"],
     "bookreview": ["postgresql", "sqlite"],
     "agnews":     ["mongodb", "sqlite"],
+    "music_brainz_20k": ["sqlite", "duckdb"],
 }
 
 

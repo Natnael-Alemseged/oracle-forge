@@ -26,13 +26,12 @@ Usage:
     print(harness.pass_at_1_score())
 """
 
+import hashlib
 import json
 import time
-import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Any
-
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Type aliases

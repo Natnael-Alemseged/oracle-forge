@@ -15,7 +15,7 @@ from datetime import datetime
 # Allow running from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.schema_introspector import introspect_all, format_for_kb
+from utils.schema_introspector import format_for_kb, introspect_all
 
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema_output.md")
 

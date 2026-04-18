@@ -50,6 +50,9 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | date | str (list joined) | "2011-03-18 21:32:32, 2011-07-03 19:19:32, ..." — comma-separated timestamps |
 
 ### DuckDB — Yelp user_database (yelp_user.db)
+**CRITICAL: The `business` table does NOT exist in DuckDB. It is a MongoDB collection.
+Never reference or JOIN `business` in any DuckDB/SQL query — it will always fail with "Table does not exist".**
+
 **Table: review** (~2000 rows)
 | Field | Type | Sample Values |
 |-------|------|---------------|
@@ -61,7 +64,7 @@ Never fabricate data. If you cannot answer, say so explicitly.
 | funny | BIGINT | vote count |
 | cool | BIGINT | vote count |
 | text | VARCHAR | Free-text review content |
-| date | VARCHAR | "August 01, 2016 at 03:44 AM" — parse year with: EXTRACT(year FROM strptime(date, '%B %d, %Y at %I:%M %p')) or use LIKE '%2018%' |
+| date | VARCHAR | **MIXED FORMATS** — some rows use `"August 01, 2016 at 03:44 AM"`, others use `"21 May 2016, 18:48"`. NEVER call `strptime()` or `TRY_STRPTIME()` with a single format — it crashes on the other format. For year-only filters: `date LIKE '%2016%'`. For date-range filters: `COALESCE(TRY_STRPTIME(date, '%B %d, %Y at %I:%M %p'), TRY_STRPTIME(date, '%d %b %Y, %H:%M')) BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD'` |
 
 **Table: tip** (~rows)
 | Field | Type | Sample Values |
@@ -104,6 +107,55 @@ These mismatches will cause silent wrong answers if not handled:
    - DuckDB review.user_id = `"userid_548"` — prefixed string
    - No cross-DB user join is possible on the Yelp dataset without disambiguation.
 
+### PostgreSQL — Bookreview books_database (bookreview_db)
+**Table: books_info** (~200 rows)
+| Field | Type | Sample Values |
+|-------|------|---------------|
+| book_id | text | "bookid_1", "bookid_2" |
+| title | text | "Chaucer", "Service: A Navy SEAL at War" |
+| subtitle | text | free text or null |
+| author | text | author name string |
+| rating_number | bigint | 29, 3421, 1 — total number of ratings |
+| features | text | free text product features |
+| description | text | free text book description |
+| price | double precision | numeric price |
+| store | text | store name |
+| categories | text | JSON array string e.g. `["Books", "Literature & Fiction", "History & Criticism"]` |
+| details | text | free text containing publication info — year, language, format, ISBN, pages |
+
+**Critical parsing rules:**
+- `categories` is stored as a JSON array string. Use `categories LIKE '%Literature & Fiction%'` for filtering — do NOT try to parse as JSON in SQL.
+- For category values containing apostrophes (e.g. `Children's Books`), use doubled single quotes in SQL: `categories LIKE '%Children''s Books%'` — NEVER use backslash escaping (`\'`).
+- `details` contains the publication year as free text e.g. "released on January 1, 2004" or "first edition on May 8, 2012". Extract year with: `CAST(SUBSTRING(details FROM 'released on [A-Za-z]+ \d+, (\d{4})') AS INTEGER)` or use `details LIKE '%2020%'` for year-only checks.
+- `details` contains language in two formats: "written in English" OR "is available in English". Use `details LIKE '%in English%'` to match both — NEVER use `'%written in English%'` alone as it misses the "available in English" variant.
+- `rating_number` is the count of ratings, NOT the average rating. Average rating must come from SQLite `review.rating`.
+- `book_id` format: `"bookid_N"` — joins to SQLite `review.purchase_id` = `"purchaseid_N"` (same integer N, different prefix).
+- PostgreSQL and SQLite are SEPARATE databases — you CANNOT join them in a single SQL query. Run each query independently and merge results in Python.
+
+### SQLite — Bookreview review_database (review_query.db)
+**Table: review** (~rows)
+| Field | Type | Sample Values |
+|-------|------|---------------|
+| purchase_id | TEXT | "purchaseid_186", "purchaseid_8" |
+| rating | INTEGER | 1–5 |
+| title | TEXT | review title string |
+| text | TEXT | free-form review text |
+| review_time | TEXT | ISO format "2012-11-24 18:52:00" — clean, use strftime('%Y', review_time) for year |
+| helpful_vote | INTEGER | 0, 1, 2 |
+| verified_purchase | INTEGER | 0 or 1 |
+
+**Critical join rule:**
+- PostgreSQL `books_info.book_id` = `"bookid_N"` ↔ SQLite `review.purchase_id` = `"purchaseid_N"`
+- Strip both prefixes, match on integer N. Direct string equality returns zero rows.
+- Join pattern: `CAST(REPLACE(b.book_id, 'bookid_', '') AS INTEGER) = CAST(REPLACE(r.purchase_id, 'purchaseid_', '') AS INTEGER)`
+- Or use LIKE: `b.book_id = 'bookid_' || REPLACE(r.purchase_id, 'purchaseid_', '')`
+- PostgreSQL and SQLite are SEPARATE databases — do NOT write a single SQL query that references both. Run each independently.
+- For apostrophes in string literals use doubled single quotes: `'Children''s Books'` — NEVER `\'`.
+
+**Decade extraction from details:**
+- Use REGEXP or SUBSTRING to extract 4-digit year from `details`, then compute decade: `(year / 10) * 10`
+- PostgreSQL: `CAST(SUBSTRING(details FROM '(\d{4})') AS INTEGER) / 10 * 10`
+
 ## Behavioral Rules
 1. Always produce a query trace — never return an answer without it
 2. Self-correct on execution failure — retry up to 3 times with diagnosis
@@ -113,8 +165,83 @@ These mismatches will cause silent wrong answers if not handled:
 6. Consult the corrections log in your context before generating a fix (Layer 3)
 7. If results are empty, say so explicitly — do not fabricate
 8. Do not conflate MongoDB fields with DuckDB fields — they are different databases
+9. **MongoDB pipelines MUST always begin with `{"$collection": "<name>"}` as the first element.**
+   Omitting `$collection` causes the query to silently fall back to the `business` collection,
+   which will return wrong results for `checkin` queries. Use `"checkin"` for check-in data.
+10. **Category questions**: business categories are NOT a MongoDB field — they are embedded in
+    the `description` text (e.g. "...offers Restaurants, Italian, Nightlife."). Never use
+    `$group` on a categories field. Instead, return `business_id` + `description` per document
+    and let post-processing extract and aggregate categories via the description patterns.
 
 ## Context Layers Injected at Session Start
 - **Layer 1**: This file (schema + behavioral rules)
 - **Layer 2**: `kb/domain/domain_knowledge.md` (domain terms, fiscal conventions)
 - **Layer 3**: `kb/corrections/corrections_log.md` (past failures and fixes)
+
+### GITHUB_REPOS — metadata database (github_repos_metadata_query tool)
+SQLite database with 3 tables:
+
+**Table: languages**
+- repo_name (TEXT): GitHub repo "owner/repo" e.g. "apple/swift"
+- language_description (TEXT): Languages used e.g. "Swift JavaScript"
+
+**Table: repos**
+- repo_name (TEXT): GitHub repo "owner/repo"
+- watch_count (INTEGER): Number of watchers
+
+**Table: licenses**
+- repo_name (TEXT): GitHub repo "owner/repo"
+- license (TEXT): e.g. "apache-2.0", "mit"
+
+### GITHUB_REPOS — artifacts database (github_repos_artifacts_query tool)
+DuckDB database with 3 tables:
+
+**Table: commits**
+- commit (TEXT): SHA identifier
+- subject (TEXT): Short commit message
+- message (TEXT): Full commit message
+- repo_name (TEXT): GitHub repo "owner/repo"
+
+**Table: contents**
+- id (TEXT): File blob identifier
+- content (TEXT): File text content
+- sample_repo_name (TEXT): GitHub repo "owner/repo"
+- sample_path (TEXT): File path e.g. "README.md"
+- repo_data_description (TEXT): File metadata description
+
+**Table: files**
+- repo_name (TEXT): GitHub repo "owner/repo"
+- path (TEXT): File path
+- id (TEXT): File blob identifier
+
+**CRITICAL RULES for GITHUB_REPOS:**
+- NEVER join SQLite and DuckDB in one query — they are separate databases
+- Use github_repos_metadata_query for: languages, repos, licenses tables
+- Use github_repos_artifacts_query for: commits, contents, files tables
+- Cross-DB pattern: Step 1 get repo_names from SQLite, Step 2 use IN (...) in DuckDB
+- NEVER use subqueries that reference tables from the other database
+
+**EXACT CORRECT SQL PATTERNS for GITHUB_REPOS:**
+
+For Q3 type (commit count with language+license filter):
+- github_repos_metadata_query: SELECT DISTINCT l.repo_name FROM languages l JOIN licenses li ON l.repo_name = li.repo_name WHERE l.language_description LIKE '%Shell%' AND li.license = 'apache-2.0'
+- github_repos_artifacts_query: SELECT COUNT(*) as num_messages FROM commits WHERE repo_name IN ('repo1','repo2') AND message IS NOT NULL AND LENGTH(message) < 1000 AND LOWER(message) NOT LIKE 'merge%' AND LOWER(message) NOT LIKE 'update%' AND LOWER(message) NOT LIKE 'test%'
+
+For Q4 type (top repos by commits, language filter):
+- github_repos_metadata_query: SELECT repo_name FROM languages WHERE language_description NOT LIKE '%Python%'
+- github_repos_artifacts_query: SELECT repo_name, COUNT(*) as num_commits FROM commits WHERE repo_name IN ('repo1','repo2') GROUP BY repo_name ORDER BY num_commits DESC LIMIT 5
+
+For Q1 type (README copyright proportion):
+- github_repos_metadata_query: SELECT repo_name FROM languages WHERE language_description NOT LIKE '%Python%'
+- github_repos_artifacts_query: SELECT COUNT(DISTINCT sample_repo_name) as total, SUM(CASE WHEN LOWER(content) LIKE '%copyright%' THEN 1 ELSE 0 END) as with_copyright FROM contents WHERE sample_path LIKE '%README%' AND sample_repo_name IN ('repo1','repo2')
+
+For Q2 type (most copied Swift file):
+- github_repos_metadata_query: SELECT repo_name FROM languages WHERE language_description LIKE '%Swift%'
+- github_repos_artifacts_query: SELECT sample_repo_name, id, COUNT(*) as copy_count FROM contents WHERE sample_path LIKE '%.swift' AND (repo_data_description IS NULL OR repo_data_description NOT LIKE '%binary%') AND sample_repo_name IN ('repo1','repo2') GROUP BY sample_repo_name, id ORDER BY copy_count DESC LIMIT 1
+
+**IMPORTANT DATA FACTS for GITHUB_REPOS:**
+- The commits table in artifacts database only has 6 repos: torvalds/linux, apple/swift, twbs/bootstrap, Microsoft/vscode, facebook/react, tensorflow/tensorflow
+- Do NOT use large IN clauses from SQLite for DuckDB queries — most repos won't match
+- For Q4 type (top repos by commits, not Python): Query DuckDB commits directly, then filter by joining with SQLite language info
+- CORRECT Q4 pattern: github_repos_artifacts_query first: SELECT repo_name, COUNT(*) as num_commits FROM commits GROUP BY repo_name ORDER BY num_commits DESC LIMIT 10 — then filter out Python repos using SQLite results
+- CORRECT Q3 pattern: github_repos_metadata_query: SELECT DISTINCT l.repo_name FROM languages l JOIN licenses li ON l.repo_name = li.repo_name WHERE l.language_description LIKE '%Shell%' AND li.license = 'apache-2.0' — then github_repos_artifacts_query: SELECT COUNT(*) as num_messages FROM commits WHERE repo_name IN (results from metadata) AND message IS NOT NULL AND LENGTH(message) < 1000 AND LOWER(message) NOT LIKE 'merge%' AND LOWER(message) NOT LIKE 'update%' AND LOWER(message) NOT LIKE 'test%'

@@ -22,14 +22,12 @@ After running, paste the output into kb/domain/yelp_schema.md to fill in
 the [ACTION REQUIRED] sections with confirmed column names and key formats.
 """
 
-import json
 import sqlite3
 from typing import Any
 
 import duckdb
 import psycopg2
 from pymongo import MongoClient
-
 
 # ---------------------------------------------------------------------------
 # Type alias for connection parameters
@@ -161,7 +159,11 @@ def _introspect_postgres(params: ConnectionParams) -> dict:
         cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
         table_names = [r[0] for r in cur.fetchall()]
         for tname in table_names:
-            cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name=%s", (tname,))
+            cur.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name=%s",
+                (tname,),
+            )
             cols_raw = cur.fetchall()
             columns = []
             for col_name, col_type in cols_raw:
@@ -191,7 +193,10 @@ def _introspect_mongo(params: ConnectionParams) -> dict:
             if sample_doc:
                 for field, value in sample_doc.items():
                     # Sample 3 values for join key format detection
-                    samples = [d.get(field) for d in db[cname].find({field: {"$exists": True}}, {field: 1}).limit(3)]
+                    cursor = db[cname].find(
+                        {field: {"$exists": True}}, {field: 1}
+                    ).limit(3)
+                    samples = [d.get(field) for d in cursor]
                     columns.append({
                         "name": field,
                         "type": type(value).__name__,
@@ -239,12 +244,14 @@ def _introspect_duckdb(params: ConnectionParams) -> dict:
         conn = duckdb.connect(params["db_path"], read_only=True)
         table_names = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
         for tname in table_names:
-            desc = conn.execute(f"DESCRIBE {tname}").fetchall()  # (name, type, null, key, default, extra)
+            # (name, type, null, key, default, extra)
+            desc = conn.execute(f"DESCRIBE {tname}").fetchall()
             columns = []
             for col in desc:
                 col_name, col_type = col[0], col[1]
                 try:
-                    samples = [r[0] for r in conn.execute(f'SELECT "{col_name}" FROM "{tname}" LIMIT 3').fetchall()]
+                    q = f'SELECT "{col_name}" FROM "{tname}" LIMIT 3'
+                    samples = [r[0] for r in conn.execute(q).fetchall()]
                 except Exception:
                     samples = []
                 columns.append({"name": col_name, "type": col_type, "sample_values": samples})

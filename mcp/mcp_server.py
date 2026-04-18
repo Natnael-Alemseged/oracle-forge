@@ -44,6 +44,24 @@ MONGO_DB   = "yelp_db"
 SQLITE_PATH = os.getenv("SQLITE_PATH", "db/dab_sqlite.db")
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "db/yelp_user.db")
 
+BOOKREVIEW_POSTGRES_DB   = os.getenv("BOOKREVIEW_POSTGRES_DB", "bookreview")
+_UMB = "/home/ubuntu/shared/DataAgentBench"
+MUSIC_BRAINZ_TRACKS_PATH = os.getenv(
+    "MUSIC_BRAINZ_TRACKS_PATH",
+    f"{_UMB}/query_music_brainz_20k/query_dataset/tracks.db",
+)
+GITHUB_REPOS_METADATA_PATH = os.getenv(
+    "GITHUB_REPOS_METADATA_PATH",
+    f"{_UMB}/query_GITHUB_REPOS/query_dataset/repo_metadata.db",
+)
+GITHUB_REPOS_ARTIFACTS_PATH = os.getenv(
+    "GITHUB_REPOS_ARTIFACTS_PATH",
+    f"{_UMB}/query_GITHUB_REPOS/query_dataset/repo_artifacts.db",
+)
+MUSIC_BRAINZ_SALES_PATH = os.getenv(
+    "MUSIC_BRAINZ_SALES_PATH",
+    f"{_UMB}/query_music_brainz_20k/query_dataset/sales.duckdb",
+)
 # Module-level MongoDB client — connection pool shared across all requests
 _mongo_client: Optional[MongoClient] = None
 
@@ -81,6 +99,37 @@ TOOLS = [
     {
         "name": "duckdb_query",
         "description": "Executes analytical SQL against the DAB DuckDB database.",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "bookreview_query",
+        "description": "Executes SQL against the PostgreSQL Bookreview books database.",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+         "name": "music_brainz_tracks_query",
+         "description": "Query music_brainz tracks SQLite database",
+         "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "music_brainz_sales_query",
+        "description": "Query music_brainz sales DuckDB database",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "github_repos_metadata_query",
+        "description": (
+            "Executes SQL against the GITHUB_REPOS metadata SQLite database "
+            "(languages, repos, licenses tables)."
+        ),
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "github_repos_artifacts_query",
+        "description": (
+            "Executes analytical SQL against the GITHUB_REPOS artifacts DuckDB database "
+            "(commits, contents, files tables)."
+        ),
         "parameters": {"sql": {"type": "string"}},
     },
     {
@@ -187,12 +236,17 @@ def _rpc_error(req_id: Any, code: int, message: str) -> dict:
 
 def _dispatch(tool_name: str, params: dict) -> Any:
     handlers = {
-        "postgres_query":  _postgres_query,
-        "mongo_aggregate": _mongo_aggregate,
-        "mongo_find":      _mongo_find,
-        "sqlite_query":    _sqlite_query,
-        "duckdb_query":    _duckdb_query,
-        "cross_db_merge":  _cross_db_merge,
+        "postgres_query":   _postgres_query,
+        "bookreview_query": _bookreview_query,
+        "music_brainz_tracks_query": _music_brainz_tracks_query,
+        "music_brainz_sales_query":  _music_brainz_sales_query,
+        "github_repos_metadata_query": _github_repos_metadata_query,
+        "github_repos_artifacts_query": _github_repos_artifacts_query,
+        "mongo_aggregate":  _mongo_aggregate,
+        "mongo_find":       _mongo_find,
+        "sqlite_query":     _sqlite_query,
+        "duckdb_query":     _duckdb_query,
+        "cross_db_merge":   _cross_db_merge,
     }
     fn = handlers.get(tool_name)
     if fn is None:
@@ -221,6 +275,44 @@ def _postgres_query(params: dict) -> list[dict]:
         conn.close()
 
 
+def _bookreview_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = psycopg2.connect(
+        host=POSTGRES_HOST, port=POSTGRES_PORT,
+        dbname=BOOKREVIEW_POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASS,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+def _music_brainz_tracks_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = sqlite3.connect(MUSIC_BRAINZ_TRACKS_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+def _music_brainz_sales_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = duckdb.connect(MUSIC_BRAINZ_SALES_PATH, read_only=True)
+    try:
+        return conn.execute(sql).fetchdf().to_dict(orient="records")
+    finally:
+        conn.close()
 def _mongo_aggregate(params: dict) -> list[dict]:
     collection = params.get("collection", "")
     if not collection:
@@ -266,6 +358,31 @@ def _duckdb_query(params: dict) -> list[dict]:
     finally:
         conn.close()
 
+
+def _github_repos_metadata_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = sqlite3.connect(GITHUB_REPOS_METADATA_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+def _github_repos_artifacts_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = duckdb.connect(GITHUB_REPOS_ARTIFACTS_PATH, read_only=True)
+    try:
+        result = conn.execute(sql)
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+    finally:
+        conn.close()
 
 def _cross_db_merge(params: dict) -> dict:
     left  = _safe_json(params.get("left_results",  "[]"))

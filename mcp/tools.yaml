@@ -26,7 +26,13 @@ sources:
   duckdb_dab:
     kind: "duckdb"
     db_path: "/home/yakob/oracle-forge/DataAgentBench/query_yelp/query_dataset/yelp_user.db"
-
+  sqlite_music_brainz:
+    kind: "sqlite"
+    db_path: "/home/ubuntu/shared/DataAgentBench/query_music_brainz_20k/query_dataset/tracks.db"
+  duckdb_music_brainz:
+    kind: "duckdb"
+    db_path: "/home/ubuntu/shared/DataAgentBench/query_music_brainz_20k/query_dataset/sales.duckdb"
+    read_only: true
 tools:
   postgres_query:
     kind: "postgres-sql"
@@ -110,3 +116,4 @@ tools:
       right_db:
         type: string
         description: "Database type for right result set."
+    

@@ -8,10 +8,13 @@ MCP_BASE_URL = "http://localhost:5000"
 
 # Maps DB type to MCP tool name (must match toolbox.runtime.yaml exactly)
 DB_TYPE_TO_TOOL = {
-    "mongodb":    "mongo_aggregate",
-    "duckdb":     "duckdb_query",
-    "postgresql": "postgres_query",
-    "sqlite":     "sqlite_query",
+    "mongodb":               "mongo_aggregate",
+    "duckdb":                "duckdb_query",
+    "postgresql":            "postgres_query",
+    "postgresql_bookreview": "bookreview_query",
+    "sqlite":                "sqlite_query",
+    "github_repos_metadata":  "github_repos_metadata_query",
+    "github_repos_artifacts": "github_repos_artifacts_query",
 }
 
 _rpc_id = 0
@@ -75,9 +78,19 @@ class QueryExecutor:
                     collection = pipeline.pop(0)["$collection"]
                 else:
                     collection = "business"
+                    print(
+                        "WARNING: MongoDB pipeline missing $collection, "
+                        f"defaulting to 'business'. Query prefix: {sub_query.query[:80]}",
+                        flush=True,
+                    )
             except (json.JSONDecodeError, IndexError):
                 pipeline = sub_query.query
                 collection = "business"
+                print(
+                    "WARNING: MongoDB pipeline parse error, "
+                    f"defaulting to 'business'. Query prefix: {sub_query.query[:80]}",
+                    flush=True,
+                )
             serialized = pipeline if isinstance(pipeline, str) else json.dumps(pipeline)
             return {"collection": collection, "pipeline": serialized}
 

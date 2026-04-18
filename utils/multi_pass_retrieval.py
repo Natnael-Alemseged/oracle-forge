@@ -39,7 +39,6 @@ import re
 from pathlib import Path
 from typing import Callable
 
-
 # ---------------------------------------------------------------------------
 # Default vocabulary expansions per DAB failure category.
 # Used when the caller does not provide explicit pass_queries.
@@ -253,7 +252,8 @@ def _keyword_overlap_score(passage: str, query: str) -> float:
 # Smoke test
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import tempfile, os
+    import os
+    import tempfile
 
     # Create a temporary KB file for testing
     sample_kb = """## Active Business Definition
