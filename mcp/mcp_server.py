@@ -24,27 +24,32 @@ import duckdb
 import psycopg2
 import psycopg2.extras
 from bson import ObjectId
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pymongo import MongoClient
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config from environment (loaded via source .env before starting)
 # ---------------------------------------------------------------------------
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
-POSTGRES_DB   = os.getenv("POSTGRES_DB", "yelp")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "yelp")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "oracle_forge")
 POSTGRES_PASS = os.getenv("POSTGRES_PASSWORD", "")
 
 MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")
 MONGO_PORT = int(os.getenv("MONGO_PORT", "27017"))
-MONGO_DB   = "yelp_db"
+MONGO_DB = "yelp_db"
 
 SQLITE_PATH = os.getenv("SQLITE_PATH", "db/dab_sqlite.db")
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "db/yelp_user.db")
 
-BOOKREVIEW_POSTGRES_DB   = os.getenv("BOOKREVIEW_POSTGRES_DB", "bookreview")
+BOOKREVIEW_POSTGRES_DB = os.getenv("BOOKREVIEW_POSTGRES_DB", "bookreview")
+CRM_SUPPORT_POSTGRES_DB = os.getenv("CRM_SUPPORT_POSTGRES_DB", "crm_support")
+PANCANCER_POSTGRES_DB = os.getenv("PANCANCER_POSTGRES_DB", "pancancer_clinical")
 _UMB = "/home/ubuntu/shared/DataAgentBench"
 MUSIC_BRAINZ_TRACKS_PATH = os.getenv(
     "MUSIC_BRAINZ_TRACKS_PATH",
@@ -93,13 +98,13 @@ TOOLS = [
     },
     {
         "name": "sqlite_query",
-        "description": "Executes SQL against the DAB SQLite database.",
-        "parameters": {"sql": {"type": "string"}},
+        "description": "Executes SQL against a SQLite database. Defaults to the DAB SQLite database unless db_path is specified.",
+        "parameters": {"sql": {"type": "string"}, "db_path": {"type": "string"}},
     },
     {
         "name": "duckdb_query",
-        "description": "Executes analytical SQL against the DAB DuckDB database.",
-        "parameters": {"sql": {"type": "string"}},
+        "description": "Executes analytical SQL against a DuckDB database. Defaults to the DAB DuckDB database unless db_path is specified.",
+        "parameters": {"sql": {"type": "string"}, "db_path": {"type": "string"}},
     },
     {
         "name": "bookreview_query",
@@ -107,9 +112,9 @@ TOOLS = [
         "parameters": {"sql": {"type": "string"}},
     },
     {
-         "name": "music_brainz_tracks_query",
-         "description": "Query music_brainz tracks SQLite database",
-         "parameters": {"sql": {"type": "string"}},
+        "name": "music_brainz_tracks_query",
+        "description": "Query music_brainz tracks SQLite database",
+        "parameters": {"sql": {"type": "string"}},
     },
     {
         "name": "music_brainz_sales_query",
@@ -133,15 +138,25 @@ TOOLS = [
         "parameters": {"sql": {"type": "string"}},
     },
     {
+        "name": "crm_support_query",
+        "description": "Executes SQL against the PostgreSQL CRM Support database.",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "pancancer_clinical_query",
+        "description": "Executes SQL against the PostgreSQL PanCancer Atlas clinical database.",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
         "name": "cross_db_merge",
         "description": "Merges two result sets from different database tools.",
         "parameters": {
-            "left_results":  {"type": "string"},
+            "left_results": {"type": "string"},
             "right_results": {"type": "string"},
-            "left_key":      {"type": "string"},
-            "right_key":     {"type": "string"},
-            "left_db":       {"type": "string"},
-            "right_db":      {"type": "string"},
+            "left_key": {"type": "string"},
+            "right_key": {"type": "string"},
+            "left_db": {"type": "string"},
+            "right_db": {"type": "string"},
         },
     },
 ]
@@ -202,9 +217,7 @@ async def mcp_rpc(body: Optional[dict] = None):
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(result)}]
-                },
+                "result": {"content": [{"type": "text", "text": json.dumps(result)}]},
             }
         except ValueError as e:
             return _rpc_error(req_id, -32602, str(e))
@@ -234,19 +247,22 @@ def _rpc_error(req_id: Any, code: int, message: str) -> dict:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+
 def _dispatch(tool_name: str, params: dict) -> Any:
     handlers = {
-        "postgres_query":   _postgres_query,
+        "postgres_query": _postgres_query,
         "bookreview_query": _bookreview_query,
+        "crm_support_query": _crm_support_query,
+        "pancancer_clinical_query": _pancancer_clinical_query,
         "music_brainz_tracks_query": _music_brainz_tracks_query,
-        "music_brainz_sales_query":  _music_brainz_sales_query,
+        "music_brainz_sales_query": _music_brainz_sales_query,
         "github_repos_metadata_query": _github_repos_metadata_query,
         "github_repos_artifacts_query": _github_repos_artifacts_query,
-        "mongo_aggregate":  _mongo_aggregate,
-        "mongo_find":       _mongo_find,
-        "sqlite_query":     _sqlite_query,
-        "duckdb_query":     _duckdb_query,
-        "cross_db_merge":   _cross_db_merge,
+        "mongo_aggregate": _mongo_aggregate,
+        "mongo_find": _mongo_find,
+        "sqlite_query": _sqlite_query,
+        "duckdb_query": _duckdb_query,
+        "cross_db_merge": _cross_db_merge,
     }
     fn = handlers.get(tool_name)
     if fn is None:
@@ -258,13 +274,17 @@ def _dispatch(tool_name: str, params: dict) -> Any:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
+
 def _postgres_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
         raise ValueError("Parameter 'sql' is required")
     conn = psycopg2.connect(
-        host=POSTGRES_HOST, port=POSTGRES_PORT,
-        dbname=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASS,
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        dbname=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASS,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
     try:
@@ -280,8 +300,11 @@ def _bookreview_query(params: dict) -> list[dict]:
     if not sql:
         raise ValueError("Parameter 'sql' is required")
     conn = psycopg2.connect(
-        host=POSTGRES_HOST, port=POSTGRES_PORT,
-        dbname=BOOKREVIEW_POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASS,
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        dbname=BOOKREVIEW_POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASS,
         cursor_factory=psycopg2.extras.RealDictCursor,
     )
     try:
@@ -290,6 +313,7 @@ def _bookreview_query(params: dict) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
 
 def _music_brainz_tracks_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
@@ -304,6 +328,7 @@ def _music_brainz_tracks_query(params: dict) -> list[dict]:
     finally:
         conn.close()
 
+
 def _music_brainz_sales_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
@@ -313,6 +338,48 @@ def _music_brainz_sales_query(params: dict) -> list[dict]:
         return conn.execute(sql).fetchdf().to_dict(orient="records")
     finally:
         conn.close()
+
+
+def _crm_support_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = psycopg2.connect(
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        dbname=CRM_SUPPORT_POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASS,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _pancancer_clinical_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = psycopg2.connect(
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        dbname=PANCANCER_POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASS,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def _mongo_aggregate(params: dict) -> list[dict]:
     collection = params.get("collection", "")
     if not collection:
@@ -336,7 +403,8 @@ def _sqlite_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
         raise ValueError("Parameter 'sql' is required")
-    conn = sqlite3.connect(SQLITE_PATH)
+    db_path = params.get("db_path") or SQLITE_PATH
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
@@ -350,7 +418,8 @@ def _duckdb_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
         raise ValueError("Parameter 'sql' is required")
-    conn = duckdb.connect(DUCKDB_PATH, read_only=True)
+    db_path = params.get("db_path") or DUCKDB_PATH
+    conn = duckdb.connect(db_path, read_only=True)
     try:
         result = conn.execute(sql)
         cols = [d[0] for d in result.description]
@@ -372,6 +441,7 @@ def _github_repos_metadata_query(params: dict) -> list[dict]:
     finally:
         conn.close()
 
+
 def _github_repos_artifacts_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
@@ -384,10 +454,11 @@ def _github_repos_artifacts_query(params: dict) -> list[dict]:
     finally:
         conn.close()
 
+
 def _cross_db_merge(params: dict) -> dict:
-    left  = _safe_json(params.get("left_results",  "[]"))
+    left = _safe_json(params.get("left_results", "[]"))
     right = _safe_json(params.get("right_results", "[]"))
-    left_key  = params.get("left_key",  "")
+    left_key = params.get("left_key", "")
     right_key = params.get("right_key", "")
 
     if not left_key or not right_key:
@@ -414,6 +485,7 @@ def _cross_db_merge(params: dict) -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _serialize_doc(doc: dict) -> dict:
     out = {}
     for k, v in doc.items():
@@ -433,4 +505,5 @@ def _serialize_doc(doc: dict) -> dict:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=5000)

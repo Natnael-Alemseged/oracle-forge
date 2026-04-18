@@ -3,6 +3,7 @@ import os
 import re
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 from agent import llm_client
 from agent.context_manager import ContextManager
@@ -11,11 +12,75 @@ from agent.prompt_library import PromptLibrary
 from agent.query_executor import QueryExecutor
 from agent.self_corrector import SelfCorrector
 
+_DAB_ROOT = Path(os.getenv("DAB_ROOT", Path(__file__).resolve().parents[1] / "DataAgentBench"))
+
+# CRMArena Pro db_paths (like BOOKREVIEW_POSTGRES_DB in mcp_server.py)
+CRM_CORE_CRM_PATH = str(_DAB_ROOT / "query_crmarenapro/query_dataset/core_crm.db")
+CRM_SALES_PIPELINE_PATH = str(_DAB_ROOT / "query_crmarenapro/query_dataset/sales_pipeline.duckdb")
+CRM_PRODUCTS_ORDERS_PATH = str(_DAB_ROOT / "query_crmarenapro/query_dataset/products_orders.db")
+CRM_ACTIVITIES_PATH = str(_DAB_ROOT / "query_crmarenapro/query_dataset/activities.duckdb")
+CRM_TERRITORY_PATH = str(_DAB_ROOT / "query_crmarenapro/query_dataset/territory.db")
+
+# Map logical DB name → (db_type, db_path) for crmarenapro
+CRM_DB_MAP = {
+    "core_crm": ("sqlite", CRM_CORE_CRM_PATH),
+    "sales_pipeline": ("duckdb", CRM_SALES_PIPELINE_PATH),
+    "support": ("postgresql_crm", None),
+    "products_orders": ("sqlite", CRM_PRODUCTS_ORDERS_PATH),
+    "activities": ("duckdb", CRM_ACTIVITIES_PATH),
+    "territory": ("sqlite", CRM_TERRITORY_PATH),
+}
+
+# DEPS_DEV_V1 db_paths
+DEPS_DEV_SQLITE_PATH = str(_DAB_ROOT / "query_DEPS_DEV_V1/query_dataset/package_query.db")
+DEPS_DEV_DUCKDB_PATH = str(_DAB_ROOT / "query_DEPS_DEV_V1/query_dataset/project_query.db")
+
+DEPS_DEV_DB_MAP = {
+    "package_database": ("sqlite", DEPS_DEV_SQLITE_PATH),
+    "project_database": ("duckdb", DEPS_DEV_DUCKDB_PATH),
+}
+
+# PANCANCER_ATLAS db_paths
+PANCANCER_MOLECULAR_PATH = str(
+    _DAB_ROOT / "query_PANCANCER_ATLAS/query_dataset/pancancer_molecular.db"
+)
+
+PANCANCER_DB_MAP = {
+    "clinical_database": (
+        "postgresql_pancancer",
+        None,
+    ),  # PostgreSQL — uses PANCANCER_POSTGRES_DB env var
+    "molecular_database": ("duckdb", PANCANCER_MOLECULAR_PATH),
+}
+
+DATASET_REGISTRY = {
+    "crmarenapro": CRM_DB_MAP,
+    "DEPS_DEV_V1": DEPS_DEV_DB_MAP,
+    "PANCANCER_ATLAS": PANCANCER_DB_MAP,
+}
+
 
 def _enforce_intent_db_coverage(
     question: str, available_databases: list[str], intent: dict, dataset: str = ""
 ) -> dict:
     """Merge LLM intent with heuristics so multi-DB questions include the right stores."""
+    # Registry datasets (CRM / DEPS / PanCancer): normalise logical DB names from LLM output
+    if dataset and bool(DATASET_REGISTRY.get(dataset, {})):
+        registry = DATASET_REGISTRY.get(dataset, {})
+        target_list = intent.get("target_databases") or []
+        resolved: list[str] = []
+        for name in target_list:
+            if name in registry:
+                resolved.append(name)
+            else:
+                matches = [k for k, (db_type, _) in registry.items() if db_type == name]
+                if matches:
+                    resolved.extend(matches)
+        if not resolved:
+            resolved = list(registry.keys())
+        intent["target_databases"] = resolved
+        return intent
+
     target = set(intent.get("target_databases") or [])
     if not target:
         target = set(available_databases)
@@ -24,14 +89,31 @@ def _enforce_intent_db_coverage(
     available = set(available_databases)
 
     join_keywords = [
-        "most", "top", "highest", "proportion", "count", "how many",
-        "which", "list", "identify", "number of", "frequently", "average",
+        "most",
+        "top",
+        "highest",
+        "proportion",
+        "count",
+        "how many",
+        "which",
+        "list",
+        "identify",
+        "number of",
+        "frequently",
+        "average",
     ]
     if any(kw in q for kw in join_keywords) and len(available_databases) > 1:
         target |= available
 
     MONGO_SIGNALS = (
-        "city", "state", "categor", "wifi", "wi-fi", "parking", "credit card", "business"
+        "city",
+        "state",
+        "categor",
+        "wifi",
+        "wi-fi",
+        "parking",
+        "credit card",
+        "business",
     )
     needs_duck_rating = "rating" in q
     _YEARS = ("2015", "2016", "2017", "2018", "2019", "2020")
@@ -45,10 +127,28 @@ def _enforce_intent_db_coverage(
     ds = (dataset or "").lower()
     if ds == "agnews" and {"mongodb", "sqlite"}.issubset(available):
         _AGNEWS_METADATA_TERMS = (
-            "author", "published", "publication", "year",
-            "europe", "asia", "africa", "north america", "south america", "oceania",
-            "region", "2010", "2011", "2012", "2013", "2014", "2015",
-            "2016", "2017", "2018", "2019", "2020",
+            "author",
+            "published",
+            "publication",
+            "year",
+            "europe",
+            "asia",
+            "africa",
+            "north america",
+            "south america",
+            "oceania",
+            "region",
+            "2010",
+            "2011",
+            "2012",
+            "2013",
+            "2014",
+            "2015",
+            "2016",
+            "2017",
+            "2018",
+            "2019",
+            "2020",
         )
         if any(term in q for term in _AGNEWS_METADATA_TERMS):
             target.update({"mongodb", "sqlite"})
@@ -97,8 +197,8 @@ def _validate_query_semantics(question: str, db_type: str, query: str) -> None:
     if db_type == "mongodb" and stripped in ("[]", "{}", "[{}]"):
         raise ValueError("Invalid empty MongoDB pipeline.")
 
-class AgentCore:
 
+class AgentCore:
     def __init__(self, context_manager: ContextManager, prompt_library: PromptLibrary):
         self.client = llm_client.get_client()
         self.ctx = context_manager
@@ -108,11 +208,7 @@ class AgentCore:
         self._active_dataset = ""
 
     def analyze_intent(self, question: str, available_databases: list[str]) -> dict:
-        """Call LLM to identify which DBs to query and extract structured intent.
-
-        Returns: {"target_databases": [...], "intent_summary": str,
-                  "requires_join": bool, "data_fields_needed": [...]}
-        """
+        """Call LLM to identify which DBs to query and extract structured intent."""
         system_context = self.ctx.get_full_context()
         prompt = self.prompts.intent_analysis(question, available_databases)
         text = llm_client.call(self.client, prompt, system=system_context, max_tokens=1024)
@@ -121,55 +217,99 @@ class AgentCore:
             question, available_databases, intent, self._active_dataset
         )
 
-    def decompose_query(self, question: str, intent: dict) -> list[SubQuery]:
+    def decompose_query(self, question: str, intent: dict, dataset: str = "") -> list[SubQuery]:
         """Break multi-DB intent into one SubQuery per target database."""
         requires_join = intent.get("requires_join", False)
         join_direction = intent.get("join_direction", "mongodb_first")
+        registry = DATASET_REGISTRY.get(dataset, {})
         sub_queries = []
-        for db_type in intent.get("target_databases", []):
-            if requires_join and join_direction == "mongodb_first" and db_type == "duckdb":
-                # Placeholder — DuckDB query regenerated with business_refs after MongoDB runs
-                sub_queries.append(SubQuery(
-                    database_type=db_type,
-                    query="SELECT 1",
-                    intent=intent.get("intent_summary", question),
-                ))
-            elif requires_join and join_direction == "duckdb_first" and db_type == "mongodb":
-                # Placeholder — MongoDB query regenerated with business_ids after DuckDB runs
-                _placeholder_query = (
-                    '[{"$collection": "business"}, '
-                    '{"$project": {"business_id": 1, "name": 1, "description": 1}}]'
+
+        # Determine if any target DB is actually MongoDB (affects placeholder logic)
+        has_mongodb_target = any(
+            (registry.get(n, (n, None))[0] if n in registry else n) == "mongodb"
+            for n in intent.get("target_databases", [])
+        )
+
+        for db_name in intent.get("target_databases", []):
+            # Resolve logical name → db_type + db_path if in registry
+            if db_name in registry:
+                db_type, db_path = registry[db_name]
+            else:
+                db_type = db_name  # already a db_type string
+                db_path = None
+
+            # Placeholder logic only applies to Yelp-style MongoDB↔DuckDB joins
+            if (
+                requires_join
+                and join_direction == "mongodb_first"
+                and db_type == "duckdb"
+                and has_mongodb_target
+            ):
+                sub_queries.append(
+                    SubQuery(
+                        database_type=db_type,
+                        query="SELECT 1",
+                        intent=intent.get("intent_summary", question),
+                        db_path=db_path,
+                        logical_name=db_name if db_name in registry else None,
+                    )
                 )
-                sub_queries.append(SubQuery(
-                    database_type=db_type,
-                    query=_placeholder_query,
-                    intent=intent.get("intent_summary", question),
-                ))
-            elif requires_join and join_direction == "duckdb_first" and db_type == "duckdb":
-                # Placeholder — DuckDB query will be generated/overridden in run() once
-                # the direction is confirmed and the correct template is chosen (e.g.
-                # deterministic user-category query). This prevents a LLM ValueError here
-                # from crashing the whole run before run() can apply the right override.
-                sub_queries.append(SubQuery(
-                    database_type=db_type,
-                    query="SELECT 1",
-                    intent=intent.get("intent_summary", question),
-                ))
+            elif (
+                requires_join
+                and join_direction == "duckdb_first"
+                and db_type == "mongodb"
+                and has_mongodb_target
+            ):
+                sub_queries.append(
+                    SubQuery(
+                        database_type=db_type,
+                        query='[{"$collection": "business"}, {"$project": {"business_id": 1, "name": 1, "description": 1}}]',
+                        intent=intent.get("intent_summary", question),
+                        db_path=db_path,
+                        logical_name=db_name if db_name in registry else None,
+                    )
+                )
+            elif (
+                requires_join
+                and join_direction == "duckdb_first"
+                and db_type == "duckdb"
+                and has_mongodb_target
+            ):
+                sub_queries.append(
+                    SubQuery(
+                        database_type=db_type,
+                        query="SELECT 1",
+                        intent=intent.get("intent_summary", question),
+                        db_path=db_path,
+                        logical_name=db_name if db_name in registry else None,
+                    )
+                )
             else:
                 try:
-                    query = self._generate_query_for_db(question, db_type, intent)
+                    # For registry logical names, use the full CRM schema context
+                    if db_name in registry:
+                        query = self._generate_query_for_logical_db(
+                            question, db_name, db_type, intent
+                        )
+                    else:
+                        query = self._generate_query_for_db(question, db_type, intent)
                 except ValueError:
-                    # LLM returned unparseable output — use a safe no-op placeholder so
-                    # the run() orchestration can still decide what to do.
-                    query = "SELECT 1" if db_type != "mongodb" else (
-                        '[{"$collection": "business"}, '
-                        '{"$project": {"business_id": 1, "name": 1, "description": 1}}]'
+                    query = (
+                        "SELECT 1"
+                        if db_type != "mongodb"
+                        else (
+                            '[{"$collection": "business"}, {"$project": {"business_id": 1, "name": 1, "description": 1}}]'
+                        )
                     )
-                sub_queries.append(SubQuery(
-                    database_type=db_type,
-                    query=query,
-                    intent=intent.get("intent_summary", question),
-                ))
+                sub_queries.append(
+                    SubQuery(
+                        database_type=db_type,
+                        query=query,
+                        intent=intent.get("intent_summary", question),
+                        db_path=db_path,
+                        logical_name=db_name if db_name in registry else None,
+                    )
+                )
         return sub_queries
 
     def _generate_query_for_db(self, question: str, db_type: str, intent: dict) -> str:
@@ -177,9 +317,7 @@ class AgentCore:
         schema = self.ctx.get_schema_for_db(db_type, self._active_dataset)
         system_context = self.ctx.get_full_context()
         if db_type == "mongodb":
-            base_prompt = self.prompts.nl_to_mongodb(
-                question, schema, dataset=self._active_dataset
-            )
+            base_prompt = self.prompts.nl_to_mongodb(question, schema, dataset=self._active_dataset)
         else:
             base_prompt = self.prompts.nl_to_sql(
                 question, schema, dialect=db_type, dataset=self._active_dataset
@@ -207,11 +345,259 @@ class AgentCore:
             f"Could not generate a valid {db_type} query after 3 attempts. Last error: {last_error}"
         ) from last_error
 
+    def _crm_second_pass(
+        self, question: str, sub_queries: list, raw_results: dict, dataset: str
+    ) -> tuple[dict, list, list]:
+        """For registry datasets: use successful results to re-query DBs that failed or returned empty.
+        Returns (updated_raw_results, extra_corrections, extra_merges).
+        """
+        corrections = []
+        merges = []
+        registry = DATASET_REGISTRY.get(dataset, {})
+
+        # Collect successful results (non-error, non-empty)
+        good_results = {
+            k: v for k, v in raw_results.items() if not (isinstance(v, dict) and "error" in v) and v
+        }
+        if not good_results:
+            return raw_results, corrections, merges
+
+        # For each sub-query that failed or returned empty, try a second-pass query
+        # with the successful results as context in the prompt
+        context_summary = json.dumps(
+            {k: (v[:3] if isinstance(v, list) else v) for k, v in good_results.items()}, default=str
+        )[:1500]
+
+        for sq in sub_queries:
+            result_key = _logical_name_from_path(sq.db_path) or sq.database_type
+            current = raw_results.get(result_key)
+            failed = isinstance(current, dict) and "error" in current
+
+            # Only retry actual errors, not empty results — empty is a valid answer
+            if not failed:
+                continue
+
+            logical_name = _logical_name_from_path(sq.db_path) or result_key
+            if logical_name not in registry:
+                continue
+
+            db_type, _ = registry[logical_name]
+            schema = self.ctx.get_schema_for_logical_db(logical_name, self._active_dataset)
+            dialect = (
+                "duckdb"
+                if db_type == "duckdb"
+                else ("postgresql" if "postgresql" in db_type else "sqlite")
+            )
+
+            retry_prompt = self.prompts.nl_to_sql(
+                question, schema, dialect=dialect, dataset=self._active_dataset
+            )
+            retry_prompt += (
+                f"\n\nYou are querying the '{logical_name}' database. "
+                f"Only reference tables that belong to '{logical_name}'. "
+                f"Do NOT reference any Yelp, MongoDB, review, business, checkin, or tip tables."
+                f"\n\nResults already retrieved from other databases (use these to filter/join):\n{context_summary}"
+                f"\n\nGenerate a query that uses the above results to answer the question. "
+                f"Do NOT reference tables from other databases in this query."
+            )
+
+            try:
+                raw = llm_client.call(self.client, retry_prompt, system=schema, max_tokens=512)
+                new_query = _strip_markdown(raw)
+                allowed_tables = {
+                    "core_crm": {"user", "account", "contact"},
+                    "sales_pipeline": {
+                        "opportunity",
+                        "contract",
+                        "lead",
+                        "quote",
+                        "opportunitylineitem",
+                        "quotelineitem",
+                    },
+                    "support": {
+                        "case",
+                        "knowledge__kav",
+                        "issue__c",
+                        "casehistory__c",
+                        "emailmessage",
+                        "livechattranscript",
+                    },
+                    "products_orders": {
+                        "product2",
+                        "order",
+                        "orderitem",
+                        "pricebook2",
+                        "pricebookentry",
+                        "productcategory",
+                        "productcategoryproduct",
+                    },
+                    "activities": {"event", "task", "voicecalltranscript__c"},
+                    "territory": {"territory2", "userterritory2association"},
+                    "package_database": {"packageinfo"},
+                    "project_database": {"project_packageversion", "project_info"},
+                    # PANCANCER_ATLAS
+                    "clinical_database": {"clinical_info"},
+                    "molecular_database": {"mutation_data", "rnaseq_expression"},
+                }.get(logical_name, set())
+                forbidden_in_query = {"review", "business", "tip", "checkin"} - allowed_tables
+                q_lower = new_query.lower()
+                has_forbidden = any(re.search(rf"\b{t}\b", q_lower) for t in forbidden_in_query)
+                if _looks_like_query(new_query, db_type) and not has_forbidden:
+                    new_sq = type(sq)(
+                        database_type=sq.database_type,
+                        query=new_query,
+                        intent=sq.intent,
+                        db_path=sq.db_path,
+                    )
+                    result, corr = self._execute_with_retry(new_sq, question)
+                    # Only overwrite if the new result is not an error
+                    if not (isinstance(result, dict) and "error" in result):
+                        raw_results[result_key] = result
+                        corrections.extend(corr)
+                        merges.append(
+                            f"second-pass {logical_name} using context from {list(good_results.keys())}"
+                        )
+            except Exception:
+                pass  # keep original failed result
+
+        return raw_results, corrections, merges
+
+    def _generate_query_for_logical_db(
+        self, question: str, logical_name: str, db_type: str, intent: dict
+    ) -> str:
+        """Generate a query for a specific logical DB (e.g. 'activities', 'sales_pipeline').
+        Schema knowledge lives in AGENT.md (CRMArena Pro section) — no hardcoded table lists here.
+        """
+        schema = self.ctx.get_schema_for_logical_db(logical_name, self._active_dataset)
+        # Use only the CRM schema section as system context to prevent Yelp bleed-through
+        system_context = schema
+        dialect = (
+            "duckdb"
+            if db_type == "duckdb"
+            else ("postgresql" if "postgresql" in db_type else "sqlite")
+        )
+
+        prompt = self.prompts.nl_to_sql(
+            question, schema, dialect=dialect, dataset=self._active_dataset
+        )
+        deps_note = ""
+        if logical_name == "package_database":
+            deps_note = (
+                "\n\nYou are querying the 'package_database' (SQLite packageinfo table). "
+                "ONLY select Name, Version, System, Licenses, VersionInfo columns. "
+                "NEVER try to get stars, forks, or GitHub metrics from this table — those are in DuckDB project_info. "
+                "For 'top N by stars/forks' questions: just filter the pool (NPM + release + optional MIT), do NOT order by stars/forks."
+            )
+        elif logical_name == "project_database":
+            deps_note = (
+                "\n\nYou are querying the 'project_database' (DuckDB). "
+                "Use the SQL template from the schema above with REGEXP_EXTRACT to extract ProjectName (owner/repo), stars, and forks. "
+                "ALWAYS use the owner/repo regex pattern: 'project ([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+)' to avoid false positives."
+            )
+        prompt += (
+            f"\n\nYou are querying the '{logical_name}' database specifically. "
+            f"Only reference tables that belong to '{logical_name}' as documented in the schema above. "
+            f"Do NOT reference any Yelp, MongoDB, review, business, checkin, or tip tables."
+            f"{deps_note}"
+        )
+
+        last_error = None
+        for attempt in range(3):
+            p = prompt
+            if attempt > 0 and last_error:
+                p += f"\n\nPrevious attempt rejected: {last_error}. Fix and return only a valid {dialect} query."
+            raw = llm_client.call(self.client, p, system=system_context, max_tokens=512)
+            cleaned = _strip_markdown(raw)
+            # Fix common LLM errors for DEPS_DEV_V1 project_database queries
+            if logical_name == "project_database":
+                cleaned = re.sub(r"\[a-zA-Z0\.9", "[a-zA-Z0-9", cleaned)
+                # Bump LIMIT to 20 so we have enough rows after SQLite whitelist filtering
+                cleaned = re.sub(r"LIMIT\s+\d+\s*;?\s*$", "LIMIT 20;", cleaned.rstrip())
+                # Remove incorrect RelationType='release' filter (only SOURCE_REPO_TYPE/ISSUE_TRACKER_TYPE exist)
+                cleaned = re.sub(
+                    r"AND\s+ppv\.RelationType\s*=\s*'release'", "", cleaned, flags=re.IGNORECASE
+                )
+                cleaned = re.sub(
+                    r"AND\s+RelationType\s*=\s*'release'", "", cleaned, flags=re.IGNORECASE
+                )
+            elif logical_name == "package_database":
+                # Remove LIMIT so we get the full whitelist for star/fork filtering
+                cleaned = re.sub(r"\bLIMIT\s+\d+\b\s*;?\s*$", "", cleaned.rstrip()).strip()
+                if cleaned and not cleaned.endswith(";"):
+                    cleaned += ";"
+            try:
+                if not _looks_like_query(cleaned, db_type):
+                    raise ValueError(f"LLM returned non-query for {logical_name}: {cleaned[:120]}")
+                # Block Yelp table references and cross-DB table references
+                forbidden = {
+                    "review",
+                    "business",
+                    "tip",
+                    "checkin",
+                    "case",
+                    "casehistory__c",
+                    "knowledge__kav",
+                    "issue__c",
+                    "emailmessage",
+                    "livechattranscript",
+                }
+                # Only block tables that don't belong to this logical DB
+                logical_tables = {
+                    "core_crm": {"user", "account", "contact"},
+                    "sales_pipeline": {
+                        "opportunity",
+                        "contract",
+                        "lead",
+                        "quote",
+                        "opportunitylineitem",
+                        "quotelineitem",
+                    },
+                    "support": {
+                        "case",
+                        "knowledge__kav",
+                        "issue__c",
+                        "casehistory__c",
+                        "emailmessage",
+                        "livechattranscript",
+                    },
+                    "products_orders": {
+                        "product2",
+                        "order",
+                        "orderitem",
+                        "pricebook2",
+                        "pricebookentry",
+                        "productcategory",
+                        "productcategoryproduct",
+                    },
+                    "activities": {"event", "task", "voicecalltranscript__c"},
+                    "territory": {"territory2", "userterritory2association"},
+                    # DEPS_DEV_V1
+                    "package_database": {"packageinfo"},
+                    "project_database": {"project_packageversion", "project_info"},
+                    # PANCANCER_ATLAS
+                    "clinical_database": {"clinical_info"},
+                    "molecular_database": {"mutation_data", "rnaseq_expression"},
+                }
+                allowed = logical_tables.get(logical_name, set())
+                q_lower = cleaned.lower()
+                bad_tables = forbidden - allowed
+                if any(re.search(rf"\b{t}\b", q_lower) for t in bad_tables):
+                    raise ValueError(
+                        f"Query for '{logical_name}' references tables from another DB. Allowed: {allowed}"
+                    )
+                return cleaned
+            except ValueError as exc:
+                last_error = exc
+        raise ValueError(
+            f"Could not generate query for {logical_name} after 3 attempts. Last: {last_error}"
+        )
+
     async def run(self, request: QueryRequest, query_executor=None) -> AgentResponse:
         """Main orchestration loop: analyze → decompose → execute → synthesize → log."""
         self_corrections: list[dict] = []
         raw_results: dict = {}
         merge_operations: list[str] = []
+        dataset = request.dataset or ""
 
         self._active_dataset = (request.dataset or "").lower()
         if request.dataset:
@@ -219,10 +605,10 @@ class AgentCore:
 
         intent = self.analyze_intent(request.question, request.available_databases)
         is_category_q = intent.get("is_category_question", False)
-        sub_queries = self.decompose_query(request.question, intent)
+        sub_queries = self.decompose_query(request.question, intent, dataset)
 
         mongo_sq = next((sq for sq in sub_queries if sq.database_type == "mongodb"), None)
-        duck_sq  = next((sq for sq in sub_queries if sq.database_type == "duckdb"),  None)
+        duck_sq = next((sq for sq in sub_queries if sq.database_type == "duckdb"), None)
         sqlite_sq = next((sq for sq in sub_queries if sq.database_type == "sqlite"), None)
 
         join_direction = intent.get("join_direction", "mongodb_first")
@@ -245,7 +631,7 @@ class AgentCore:
             # registered in 2016"), generate a deterministic DuckDB query that groups
             # by business_ref — NOT by category (categories live in MongoDB, not DuckDB).
             if _is_user_category_question(request.question.lower()):
-                year_match = re.search(r'\b(20\d\d|19\d\d)\b', request.question)
+                year_match = re.search(r"\b(20\d\d|19\d\d)\b", request.question)
                 year = year_match.group(1) if year_match else ""
                 year_filter = f"AND u.yelping_since LIKE '%{year}%'" if year else ""
                 user_cat_query = (
@@ -309,8 +695,9 @@ class AgentCore:
             self_corrections.extend(mongo_corr)
 
             # Replace sub_queries for the trace
-            sub_queries = [duck_sq if sq.database_type == "duckdb" else mongo_sq
-                           for sq in sub_queries]
+            sub_queries = [
+                duck_sq if sq.database_type == "duckdb" else mongo_sq for sq in sub_queries
+            ]
 
         elif mongo_sq and duck_sq:
             # MongoDB-first join: run MongoDB first, translate business_ids → business_refs,
@@ -351,7 +738,7 @@ class AgentCore:
                     if not all_refs:
                         # MongoDB failed to return usable results — skip DuckDB and synthesize error
                         raw_results["mongodb"] = {"error": "No state data returned from MongoDB"}
-                        answer = self._synthesize(request.question, raw_results)
+                        answer = self._synthesize(request.question, raw_results, dataset=dataset)
                         trace = QueryTrace(
                             timestamp=datetime.utcnow().isoformat(),
                             sub_queries=sub_queries,
@@ -371,8 +758,8 @@ class AgentCore:
                         f"WHERE business_ref IN ({refs_sql}) GROUP BY business_ref"
                     )
                     count_result = self._call_mcp("duckdb", count_sql)
-                    top_state, top_refs, review_count, avg_rating = (
-                        _compute_top_state_by_reviews(state_to_refs, count_result)
+                    top_state, top_refs, review_count, avg_rating = _compute_top_state_by_reviews(
+                        state_to_refs, count_result
                     )
                     if top_state:
                         raw_results["mongodb"] = {
@@ -388,9 +775,11 @@ class AgentCore:
                             f"({review_count} reviews, avg {avg_rating:.4f})"
                         )
                         # Both results already set — skip normal DuckDB execution
-                        sub_queries = [mongo_sq if sq.database_type == "mongodb" else duck_sq
-                                       for sq in sub_queries]
-                        answer = self._synthesize(request.question, raw_results)
+                        sub_queries = [
+                            mongo_sq if sq.database_type == "mongodb" else duck_sq
+                            for sq in sub_queries
+                        ]
+                        answer = self._synthesize(request.question, raw_results, dataset=dataset)
                         trace = QueryTrace(
                             timestamp=datetime.utcnow().isoformat(),
                             sub_queries=sub_queries,
@@ -474,9 +863,7 @@ class AgentCore:
             else:
                 # No refs from MongoDB — generate a plain DuckDB query (no join filter)
                 try:
-                    fallback_query = self._generate_query_for_db(
-                        request.question, "duckdb", intent
-                    )
+                    fallback_query = self._generate_query_for_db(request.question, "duckdb", intent)
                     duck_sq = SubQuery(
                         database_type="duckdb",
                         query=fallback_query,
@@ -489,8 +876,9 @@ class AgentCore:
             self_corrections.extend(duck_corr)
 
             # Replace duck_sq in sub_queries for the trace
-            sub_queries = [mongo_sq if sq.database_type == "mongodb" else duck_sq
-                           for sq in sub_queries]
+            sub_queries = [
+                mongo_sq if sq.database_type == "mongodb" else duck_sq for sq in sub_queries
+            ]
         elif sqlite_sq and mongo_sq and self._active_dataset == "agnews":
             # agnews: SQLite metadata first → article_ids → MongoDB article content
             sqlite_result, sqlite_corr = self._execute_with_retry(sqlite_sq, request.question)
@@ -505,9 +893,7 @@ class AgentCore:
                     query=new_mongo_query,
                     intent=mongo_sq.intent,
                 )
-                merge_operations.append(
-                    f"sqlite→mongodb join on {len(article_ids)} article_ids"
-                )
+                merge_operations.append(f"sqlite→mongodb join on {len(article_ids)} article_ids")
             else:
                 mongo_sq = SubQuery(
                     database_type="mongodb",
@@ -519,8 +905,7 @@ class AgentCore:
             self_corrections.extend(mongo_corr)
 
             sub_queries = [
-                sqlite_sq if sq.database_type == "sqlite" else mongo_sq
-                for sq in sub_queries
+                sqlite_sq if sq.database_type == "sqlite" else mongo_sq for sq in sub_queries
             ]
         elif any(sq.database_type == "github_repos_metadata" for sq in sub_queries):
             # GITHUB_REPOS: SQLite-first — get repo_names from metadata, then query artifacts
@@ -573,14 +958,20 @@ class AgentCore:
                     raw_results[sq.database_type] = result
                     self_corrections.extend(corrections)
         else:
-            # Generic multi-DB path — handles postgresql+sqlite, and any other combination
-            pg_sq   = next(
-                (sq for sq in sub_queries
-                 if sq.database_type in ("postgresql", "postgresql_bookreview")),
+            # Generic multi-DB path — handles postgresql+sqlite (bookreview), and any other combination
+            pg_sq = next(
+                (
+                    sq
+                    for sq in sub_queries
+                    if sq.database_type in ("postgresql", "postgresql_bookreview")
+                ),
                 None,
             )
-            sql_sq  = next((sq for sq in sub_queries if sq.database_type == "sqlite"), None)
+            sql_sq = next((sq for sq in sub_queries if sq.database_type == "sqlite"), None)
 
+            # Only apply the bookreview-specific pg→sqlite join when it's actually bookreview.
+            # crmarenapro uses postgresql_crm which is excluded from pg_sq above, so it falls
+            # through to the generic loop below.
             if pg_sq and sql_sq:
                 # PostgreSQL-first: get IDs from PostgreSQL, filter SQLite by those IDs
                 pg_result, pg_corr = self._execute_with_retry(pg_sq, request.question)
@@ -601,9 +992,7 @@ class AgentCore:
                             query=new_sql_query,
                             intent=sql_sq.intent,
                         )
-                        merge_operations.append(
-                            f"postgresql→sqlite join on {len(pg_ids)} book ids"
-                        )
+                        merge_operations.append(f"postgresql→sqlite join on {len(pg_ids)} book ids")
                     except ValueError:
                         pass
 
@@ -621,17 +1010,45 @@ class AgentCore:
                     raw_results["sqlite"] = sql_result
 
                 sub_queries = [
-                    pg_sq if sq.database_type in ("postgresql", "postgresql_bookreview")
-                    else sql_sq
+                    pg_sq if sq.database_type in ("postgresql", "postgresql_bookreview") else sql_sq
                     for sq in sub_queries
                 ]
             else:
+                # Generic multi-DB path — for crmarenapro and other multi-file datasets,
+                # execute each sub-query and store results keyed by logical DB name.
+                # Results from earlier queries are passed as context to the synthesizer.
                 for sq in sub_queries:
                     result, corrections = self._execute_with_retry(sq, request.question)
-                    raw_results[sq.database_type] = result
+                    # Use logical_name if set (e.g. "package_database"), else file stem, else db_type
+                    result_key = (
+                        sq.logical_name or _logical_name_from_path(sq.db_path) or sq.database_type
+                    )
+                    raw_results[result_key] = result
                     self_corrections.extend(corrections)
 
-        answer = self._synthesize(request.question, raw_results)
+                # For registry datasets (e.g. crmarenapro): do a second pass where
+                # successful results are used as context to re-query failed DBs.
+                # Only run if there are actual errors (not just empty results).
+                has_errors = any(isinstance(v, dict) and "error" in v for v in raw_results.values())
+                if dataset in DATASET_REGISTRY and has_errors:
+                    raw_results, extra_corrections, extra_merges = self._crm_second_pass(
+                        request.question, sub_queries, raw_results, dataset
+                    )
+                    self_corrections.extend(extra_corrections)
+                    merge_operations.extend(extra_merges)
+
+                # DEPS_DEV_V1: filter project_database (DuckDB) by package_database (SQLite) whitelist
+                # This removes false positives (packages that don't meet NPM/release/MIT criteria)
+                if dataset == "DEPS_DEV_V1":
+                    pkg_result = raw_results.get("package_database")
+                    proj_result = raw_results.get("project_database")
+                    if pkg_result is not None and proj_result is not None:
+                        filtered_proj = _filter_deps_by_package_db(pkg_result, proj_result)
+                        raw_results["project_database"] = filtered_proj
+                        n = len(filtered_proj) if isinstance(filtered_proj, list) else "?"
+                        merge_operations.append(f"deps-dev whitelist filter: {n} rows kept")
+
+        answer = self._synthesize(request.question, raw_results, dataset=dataset)
 
         trace = QueryTrace(
             timestamp=datetime.utcnow().isoformat(),
@@ -650,11 +1067,19 @@ class AgentCore:
         """Execute a sub-query, retrying up to max_retries on failure with self-correction."""
         corrections = []
         current_query = sub_query.query
-        schema = self.ctx.get_schema_for_db(sub_query.database_type, self._active_dataset)
+        schema_key = sub_query.logical_name if sub_query.logical_name else sub_query.database_type
+        schema = self.ctx.get_schema_for_db(schema_key, self._active_dataset)
 
         for attempt in range(self.corrector.max_retries + 1):
             try:
-                result = self._call_mcp(sub_query.database_type, current_query)
+                exec_sq = SubQuery(
+                    database_type=sub_query.database_type,
+                    query=current_query,
+                    intent=sub_query.intent,
+                    db_path=sub_query.db_path,
+                    logical_name=sub_query.logical_name,
+                )
+                result = self.executor.execute(exec_sq)
                 return result, corrections
             except Exception as e:
                 error_str = str(e)
@@ -662,17 +1087,23 @@ class AgentCore:
                     return {"error": error_str}, corrections
 
                 corrected = self.corrector.correct(
-                    original_question, current_query, error_str,
-                    sub_query.database_type, schema, attempt
+                    original_question,
+                    current_query,
+                    error_str,
+                    sub_query.database_type,
+                    schema,
+                    attempt,
                 )
                 failure_type = self.corrector.diagnose_failure(error_str, current_query)
-                corrections.append({
-                    "attempt": attempt + 1,
-                    "failure_type": failure_type,
-                    "original_query": current_query,
-                    "corrected_query": corrected,
-                    "error": error_str,
-                })
+                corrections.append(
+                    {
+                        "attempt": attempt + 1,
+                        "failure_type": failure_type,
+                        "original_query": current_query,
+                        "corrected_query": corrected,
+                        "error": error_str,
+                    }
+                )
                 try:
                     self.ctx.append_correction(
                         query=original_question,
@@ -754,18 +1185,20 @@ Rules:
   column (review.title is a review headline written by users, NOT the book title;
   book titles come from PostgreSQL and will be joined back in Python)
 - Return only the SQL query, no explanation, no markdown code fences"""
-        raw = llm_client.call(self.client, prompt,
-                              system=self.ctx.get_full_context(), max_tokens=512)
+        raw = llm_client.call(
+            self.client, prompt, system=self.ctx.get_full_context(), max_tokens=512
+        )
         cleaned = _strip_markdown(raw)
         if not _looks_like_query(cleaned, "sqlite"):
             raise ValueError(f"LLM returned non-query for sqlite: {cleaned[:120]}")
         return cleaned
 
-    def _synthesize(self, question: str, raw_results: dict) -> str:
-        all_errors = all(
-            isinstance(v, dict) and "error" in v
-            for v in raw_results.values()
-        )
+    def _synthesize(self, question: str, raw_results: dict, dataset: str = "") -> str:
+        if dataset == "DEPS_DEV_V1":
+            direct = _synthesize_deps_dev_direct(raw_results)
+            if direct is not None:
+                return direct
+        all_errors = all(isinstance(v, dict) and "error" in v for v in raw_results.values())
         if all_errors and raw_results:
             return (
                 "I could not produce a reliable answer because all database queries failed. "
@@ -777,8 +1210,14 @@ Rules:
         )
         return llm_client.call(self.client, prompt, max_tokens=1024)
 
-    def _log_run(self, request: QueryRequest, response: AgentResponse,
-                 intent: dict, sub_queries: list[SubQuery], self_corrections: list[dict]):
+    def _log_run(
+        self,
+        request: QueryRequest,
+        response: AgentResponse,
+        intent: dict,
+        sub_queries: list[SubQuery],
+        self_corrections: list[dict],
+    ):
         log_entry = {
             "timestamp": datetime.utcnow().isoformat(),
             "question": request.question,
@@ -795,7 +1234,79 @@ Rules:
             json.dump(log_entry, f, indent=2)
 
 
+def _filter_deps_by_package_db(sqlite_result, duck_result):
+    """Filter DuckDB project_database rows to only those present in SQLite package_database.
+    Builds a (Name, Version) whitelist from SQLite and keeps only matching DuckDB rows.
+    Falls back to unfiltered duck_result if SQLite returned an error or no pairs matched.
+    """
+    if not sqlite_result or not duck_result:
+        return duck_result
+    if isinstance(sqlite_result, dict) and "error" in sqlite_result:
+        return duck_result
+    if isinstance(duck_result, dict) and "error" in duck_result:
+        return duck_result
+    if not isinstance(sqlite_result, list) or not isinstance(duck_result, list):
+        return duck_result
+
+    valid_pairs: set = set()
+    for row in sqlite_result:
+        if isinstance(row, dict):
+            name = row.get("Name") or row.get("name") or ""
+            version = row.get("Version") or row.get("version") or ""
+        elif isinstance(row, (list, tuple)) and len(row) >= 2:
+            name, version = str(row[0]), str(row[1])
+        else:
+            continue
+        if name:
+            valid_pairs.add((str(name), str(version)))
+
+    if not valid_pairs:
+        return duck_result  # SQLite returned nothing useful — don't filter
+
+    filtered = []
+    for row in duck_result:
+        if isinstance(row, dict):
+            name = row.get("Name") or row.get("name") or ""
+            version = row.get("Version") or row.get("version") or ""
+        elif isinstance(row, (list, tuple)) and len(row) >= 2:
+            name, version = str(row[0]), str(row[1])
+        else:
+            filtered.append(row)
+            continue
+        if (str(name), str(version)) in valid_pairs:
+            filtered.append(row)
+
+    return filtered if filtered else duck_result  # fallback if nothing matched (e.g. Q2 forks)
+
+
+def _synthesize_deps_dev_direct(raw_results: dict):
+    """Bypass LLM for DEPS_DEV_V1 — dump DuckDB rows as CSV to prevent truncation.
+    Returns None if no project_database result available (falls back to LLM).
+    """
+    duck_result = raw_results.get("project_database") or raw_results.get("project_query")
+    if not duck_result or not isinstance(duck_result, list) or len(duck_result) == 0:
+        return None
+
+    lines = []
+    for row in duck_result:
+        if isinstance(row, (list, tuple)):
+            lines.append(",".join(str(c) for c in row))
+        elif isinstance(row, dict):
+            lines.append(",".join(str(v) for v in row.values()))
+        else:
+            lines.append(str(row))
+    return "\n".join(lines)
+
+
 _MARKDOWN_FENCE = re.compile(r"```[\w]*\n?([\s\S]*?)```")
+
+
+def _logical_name_from_path(db_path: str | None) -> str | None:
+    """Extract logical DB name from a file path (e.g. '.../core_crm.db' → 'core_crm')."""
+    if not db_path:
+        return None
+    stem = Path(db_path).stem  # e.g. 'core_crm', 'sales_pipeline', 'activities'
+    return stem
 
 
 def _strip_markdown(text: str) -> str:
@@ -830,25 +1341,24 @@ def _looks_like_query(text: str, db_type: str) -> bool:
 
 _CAT_EXTRACT_PATTERNS = [
     # Most-specific patterns first (avoid substring-of-phrase traps)
-    r"in the categor(?:y|ies) of '([^']+)'",            # "in the category of 'X, Y'" (quoted)
-    r'in the categor(?:y|ies) of ([^.\'"]+)\.',          # "in the category of X, Y." (unquoted)
-    r'categories such as ([^.]+?)(?:\s+for\s|\s+to\s|\.)', # "categories such as X"
-    r'eatery specializes in ([^.]+),',
-    r'specializes in ([^.]+)\.',
-    r'for ([^,]+(?:, [^,]+)*), perfect for',
+    r"in the categor(?:y|ies) of '([^']+)'",  # "in the category of 'X, Y'" (quoted)
+    r'in the categor(?:y|ies) of ([^.\'"]+)\.',  # "in the category of X, Y." (unquoted)
+    r"categories such as ([^.]+?)(?:\s+for\s|\s+to\s|\.)",  # "categories such as X"
+    r"eatery specializes in ([^.]+),",
+    r"specializes in ([^.]+)\.",
+    r"for ([^,]+(?:, [^,]+)*), perfect for",
     # Generic connectors (reliable and common — placed before optional connectors)
-    r'including ([^.]+)\.',
-    r'featuring ([^.]+)\.',
+    r"including ([^.]+)\.",
+    r"featuring ([^.]+)\.",
     # Less reliable connectors (may match non-category phrases — placed last)
-    r'for enjoying ([^.]+)\.',                           # "for enjoying X, Y, Z."
-    r'for those seeking ([^.]+)\.',                      # "for those seeking X, Y."
-    r'options for ([A-Z][^.!]+)[.!]',                   # "options for X, Y." (must start capital)
-    r'selection of ([^.]+?)\s+for\s+all',               # "selection of X for all"
-    r'mix of ([^.]+?)(?:,\s*making|\s+making|\.)',      # "mix of X, Y, making"
-    r'ranging from ([^.]+?)(?:\s+for\s+all|\s+to\s+meet|\s+making)',
-    r'diverse experience with ([^.]+)\.',
+    r"for enjoying ([^.]+)\.",  # "for enjoying X, Y, Z."
+    r"for those seeking ([^.]+)\.",  # "for those seeking X, Y."
+    r"options for ([A-Z][^.!]+)[.!]",  # "options for X, Y." (must start capital)
+    r"selection of ([^.]+?)\s+for\s+all",  # "selection of X for all"
+    r"mix of ([^.]+?)(?:,\s*making|\s+making|\.)",  # "mix of X, Y, making"
+    r"ranging from ([^.]+?)(?:\s+for\s+all|\s+to\s+meet|\s+making)",
+    r"diverse experience with ([^.]+)\.",
 ]
-
 
 
 def _compute_top_category_refs(mongo_result) -> tuple[list[str], str, int]:
@@ -876,13 +1386,14 @@ def _compute_top_category_refs(mongo_result) -> tuple[list[str], str, int]:
             cat_to_refs[cat].append(bref)
 
     total_docs = sum(
-        1 for d in docs
+        1
+        for d in docs
         if isinstance(d, dict) and d.get("business_id", "").startswith("businessid_")
     )
     if total_docs > 0 and parsed_count / total_docs < 0.30:
         print(
             f"WARNING: category extraction low confidence — "
-            f"parsed {parsed_count}/{total_docs} docs ({100*parsed_count//total_docs}%)",
+            f"parsed {parsed_count}/{total_docs} docs ({100 * parsed_count // total_docs}%)",
             flush=True,
         )
 
@@ -903,8 +1414,7 @@ def _compute_top_category_refs(mongo_result) -> tuple[list[str], str, int]:
     top_refs = cat_to_refs[top_cat]
     top_count = len(top_refs)
     print(
-        f"DEBUG category: top='{top_cat}' count={top_count} "
-        f"parsed={parsed_count}/{total_docs}",
+        f"DEBUG category: top='{top_cat}' count={top_count} parsed={parsed_count}/{total_docs}",
         flush=True,
     )
     return top_refs, top_cat, top_count
@@ -912,7 +1422,7 @@ def _compute_top_category_refs(mongo_result) -> tuple[list[str], str, int]:
 
 def _remove_limit_clause(sql: str) -> str:
     """Remove LIMIT N clause from a SQL query (used when we need all rows, not top N)."""
-    return re.sub(r'\s+LIMIT\s+\d+\s*;?\s*$', '', sql, flags=re.IGNORECASE).strip()
+    return re.sub(r"\s+LIMIT\s+\d+\s*;?\s*$", "", sql, flags=re.IGNORECASE).strip()
 
 
 def _extract_categories_from_description(desc: str) -> list[str]:
@@ -929,17 +1439,17 @@ def _extract_categories_from_description(desc: str) -> list[str]:
     # Stage 1 — find the category span tail.
     # Connectors ordered from most-specific to most-generic to pick the best anchor.
     _CONNECTOR_RE = re.compile(
-        r'(?:specializes in|categories such as|categories of|category of'
-        r'|for enjoying|for those seeking|featuring|including'
-        r'|diverse experience with|selection of|mix of|ranging from'
-        r'|offers)\s+',
+        r"(?:specializes in|categories such as|categories of|category of"
+        r"|for enjoying|for those seeking|featuring|including"
+        r"|diverse experience with|selection of|mix of|ranging from"
+        r"|offers)\s+",
         re.IGNORECASE,
     )
     best_match = None
     for m in _CONNECTOR_RE.finditer(desc):
         best_match = m  # keep the LAST match — categories always end the sentence
     if best_match:
-        span = desc[best_match.end():]
+        span = desc[best_match.end() :]
         cats = _tokenize_category_span(span)
         if cats:
             return cats
@@ -957,30 +1467,32 @@ def _extract_categories_from_description(desc: str) -> list[str]:
 def _tokenize_category_span(span: str) -> list[str]:
     """Split a raw category span string into clean, canonicalized category names."""
     # Trim trailing sentence punctuation and surrounding quotes
-    span = span.rstrip('.!? ').strip("'\"")
+    span = span.rstrip(".!? ").strip("'\"")
     # Split on commas and " and " conjunctions
-    raw = re.split(r',\s*|\s+and\s+', span)
+    raw = re.split(r",\s*|\s+and\s+", span)
     cats = []
     for c in raw:
-        c = c.strip().strip("'\"")                              # strip embedded quotes
-        c = re.sub(r'^\s*and\s+', '', c, flags=re.IGNORECASE)  # leading "and"
+        c = c.strip().strip("'\"")  # strip embedded quotes
+        c = re.sub(r"^\s*and\s+", "", c, flags=re.IGNORECASE)  # leading "and"
         # If the token contains a connective preposition, split further and check each part.
         # e.g. "Restaurants for all your dining needs" → ["Restaurants", "all your..."]
         # e.g. "options for Restaurants" → ["options", "Restaurants"]
-        fragments = re.split(r'\s+(?:for|per|to)\s+', c, flags=re.IGNORECASE)
+        fragments = re.split(r"\s+(?:for|per|to)\s+", c, flags=re.IGNORECASE)
         for frag in fragments:
             frag = frag.strip().title()
             if not frag:
                 continue
             # Discard noise: 2-letter state codes, address fragments, numeric strings,
             # overly long phrases (>40 chars = prose), >4-word phrases (= sentence fragment)
-            if (len(frag) < 2 or len(frag) > 40
-                    or len(frag.split()) > 4
-                    or re.match(r'^[A-Z]{2}$', frag)
-                    or re.search(r'\b(St\.|Dr\.|Ave|Blvd|Rd|Hwy)\b', frag)
-                    or re.search(r'\d', frag)
-                    or re.match(r'^(Options|Provides|Menu|Dishes|Items|Needs)$',
-                                frag, re.IGNORECASE)):
+            if (
+                len(frag) < 2
+                or len(frag) > 40
+                or len(frag.split()) > 4
+                or re.match(r"^[A-Z]{2}$", frag)
+                or re.search(r"\b(St\.|Dr\.|Ave|Blvd|Rd|Hwy)\b", frag)
+                or re.search(r"\d", frag)
+                or re.match(r"^(Options|Provides|Menu|Dishes|Items|Needs)$", frag, re.IGNORECASE)
+            ):
                 continue
             cats.append(frag)
     return cats
@@ -1027,9 +1539,7 @@ def _augment_with_category_aggregation(raw_results: dict) -> dict:
 
     top_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)[:10]
     enriched = dict(raw_results)
-    enriched["category_aggregation"] = [
-        {"category": k, "total_reviews": v} for k, v in top_cats
-    ]
+    enriched["category_aggregation"] = [{"category": k, "total_reviews": v} for k, v in top_cats]
     return enriched
 
 
@@ -1076,6 +1586,7 @@ def _extract_business_refs(mongo_result) -> list[str]:
 
 # ── State aggregation helpers ──────────────────────────────────────────────────
 
+
 def _is_state_aggregation_question(q_lower: str) -> bool:
     """True when the question asks which state has the most of something."""
     return "state" in q_lower and ("highest" in q_lower or "most" in q_lower)
@@ -1100,7 +1611,7 @@ def _extract_state_from_description(desc: str) -> str:
       '...in City, XX, ...'   →  standard address with trailing comma
       '...City, XX location...' →  Uber-style without trailing comma
     """
-    m = re.search(r',\s*([A-Z]{2})(?:,| )', desc)
+    m = re.search(r",\s*([A-Z]{2})(?:,| )", desc)
     return m.group(1) if m else ""
 
 
@@ -1157,6 +1668,7 @@ def _strip_state_grouping(mongo_sq: "SubQuery") -> "SubQuery":
     new_pipeline.append({"$project": {"business_id": 1, "description": 1}})
 
     from agent.models import SubQuery as _SubQuery
+
     return _SubQuery(
         database_type="mongodb",
         query=json.dumps(new_pipeline),
@@ -1202,14 +1714,11 @@ def _compute_top_state_by_reviews(
     total_cnt = state_review_count[top_state]
 
     # Weighted average rating across all businesses in the top state
-    weight_sum = sum(
-        ref_stats[r][0] * ref_stats[r][1] for r in top_refs if r in ref_stats
-    )
+    weight_sum = sum(ref_stats[r][0] * ref_stats[r][1] for r in top_refs if r in ref_stats)
     total_weight = sum(ref_stats[r][0] for r in top_refs if r in ref_stats)
     avg_rating = weight_sum / total_weight if total_weight else 0.0
 
     return top_state, top_refs, total_cnt, avg_rating
-
 
 
 def _extract_pg_ids(pg_result) -> list[str]:

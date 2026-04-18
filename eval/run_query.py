@@ -26,10 +26,17 @@ DOMAIN_KB  = "kb/domain/domain_terms.md"
 
 # Available databases per dataset
 DATASET_DBS = {
-    "yelp":       ["mongodb", "duckdb"],
-    "bookreview": ["postgresql", "sqlite"],
-    "agnews":     ["mongodb", "sqlite"],
+    "yelp":             ["mongodb", "duckdb"],
+    "bookreview":       ["postgresql", "sqlite"],
+    "googlelocal":      ["postgresql", "sqlite"],
+    "agnews":           ["mongodb", "sqlite"],
     "music_brainz_20k": ["sqlite", "duckdb"],
+    "GITHUB_REPOS":     ["github_repos_metadata", "github_repos_artifacts"],
+    "crmarenapro":      [
+        "core_crm", "sales_pipeline", "support", "products_orders", "activities", "territory",
+    ],
+    "DEPS_DEV_V1":      ["package_database", "project_database"],
+    "PANCANCER_ATLAS":  ["clinical_database", "molecular_database"],
 }
 
 

@@ -8,13 +8,15 @@ MCP_BASE_URL = "http://localhost:5000"
 
 # Maps DB type to MCP tool name (must match toolbox.runtime.yaml exactly)
 DB_TYPE_TO_TOOL = {
-    "mongodb":               "mongo_aggregate",
-    "duckdb":                "duckdb_query",
-    "postgresql":            "postgres_query",
-    "postgresql_bookreview": "bookreview_query",
-    "sqlite":                "sqlite_query",
-    "github_repos_metadata":  "github_repos_metadata_query",
-    "github_repos_artifacts": "github_repos_artifacts_query",
+    "mongodb":                 "mongo_aggregate",
+    "duckdb":                  "duckdb_query",
+    "postgresql":              "postgres_query",
+    "postgresql_bookreview":   "bookreview_query",
+    "postgresql_crm":          "crm_support_query",
+    "postgresql_pancancer":    "pancancer_clinical_query",
+    "sqlite":                  "sqlite_query",
+    "github_repos_metadata":   "github_repos_metadata_query",
+    "github_repos_artifacts":  "github_repos_artifacts_query",
 }
 
 _rpc_id = 0
@@ -95,7 +97,10 @@ class QueryExecutor:
             serialized = pipeline if isinstance(pipeline, str) else json.dumps(pipeline)
             return {"collection": collection, "pipeline": serialized}
 
-        return {"sql": sub_query.query}
+        args: dict = {"sql": sub_query.query}
+        if sub_query.db_path:
+            args["db_path"] = sub_query.db_path
+        return args
 
     def merge(self, left: dict, right: dict, left_key: str, right_key: str,
               left_db: str, right_db: str) -> dict:

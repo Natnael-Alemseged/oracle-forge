@@ -5,7 +5,6 @@ from typing import Optional
 
 
 class ContextManager:
-
     def __init__(self, agent_md_path: str, corrections_path: str, domain_kb_path: str):
         self.agent_md_path = agent_md_path
         self.corrections_path = corrections_path
@@ -70,13 +69,24 @@ class ContextManager:
 
         content = self._load_layer1_schema()
         heading_map = {
-            "mongodb":               "### MongoDB",
-            "duckdb":                "### DuckDB",
-            "postgresql":            "### PostgreSQL",
+            "mongodb": "### MongoDB",
+            "duckdb": "### DuckDB",
+            "postgresql": "### PostgreSQL",
             "postgresql_bookreview": "### PostgreSQL",
-            "sqlite":                "### SQLite",
-            "github_repos_metadata":  "### GITHUB_REPOS — metadata database",
+            "postgresql_crm": "### CRMArena Pro",
+            "sqlite": "### SQLite",
+            "github_repos_metadata": "### GITHUB_REPOS — metadata database",
             "github_repos_artifacts": "### GITHUB_REPOS — artifacts database",
+            "core_crm": "### CRMArena Pro",
+            "sales_pipeline": "### CRMArena Pro",
+            "support": "### CRMArena Pro",
+            "products_orders": "### CRMArena Pro",
+            "activities": "### CRMArena Pro",
+            "territory": "### CRMArena Pro",
+            "package_database": "### SQLite — deps_dev package_database",
+            "project_database": "### DuckDB — deps_dev project_database",
+            "clinical_database": "### PostgreSQL — PanCancer Atlas clinical_database",
+            "molecular_database": "### DuckDB — PanCancer Atlas molecular_database",
         }
         heading = heading_map.get(db_type)
         if not heading:
@@ -145,13 +155,47 @@ class ContextManager:
                 return block
         return description
 
+    def get_schema_for_logical_db(self, logical_name: str, dataset: str = "") -> str:
+        """Focused schema for CRM logical DBs or separate DEPS/PanCancer sections."""
+        deps_logical = {
+            "package_database",
+            "project_database",
+            "clinical_database",
+            "molecular_database",
+        }
+        if logical_name in deps_logical:
+            return self.get_schema_for_db(logical_name, dataset)
+
+        full_crm = self.get_schema_for_db(logical_name, dataset)
+        lines = full_crm.split("\n")
+        result = []
+        in_section = False
+        for line in lines:
+            if (
+                line.startswith("### CRMArena")
+                or line.startswith("**DAB root")
+                or line.startswith("**Critical")
+            ):
+                result.append(line)
+                in_section = False
+            elif line.startswith(f"`{logical_name}`"):
+                result.append(line)
+                in_section = True
+            elif in_section and line.startswith("`") and not line.startswith(f"`{logical_name}`"):
+                in_section = False
+            elif in_section:
+                result.append(line)
+        return "\n".join(result) if result else full_crm
+
     def add_to_session(self, query: str, result_summary: str, correction: Optional[str] = None):
-        self._session_history.append({
-            "query": query,
-            "result_summary": result_summary[:200],
-            "correction": correction,
-            "timestamp": datetime.utcnow().isoformat(),
-        })
+        self._session_history.append(
+            {
+                "query": query,
+                "result_summary": result_summary[:200],
+                "correction": correction,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
         self._session_history = self._session_history[-10:]
 
     def get_session_context(self) -> str:
@@ -160,8 +204,13 @@ class ContextManager:
         items = [f"- {h['query']}: {h['result_summary']}" for h in self._session_history[-5:]]
         return "## Recent Session Queries\n" + "\n".join(items)
 
-    def append_correction(self, query: str, what_went_wrong: str, correct_approach: str,
-                          failure_category: str = "unknown"):
+    def append_correction(
+        self,
+        query: str,
+        what_went_wrong: str,
+        correct_approach: str,
+        failure_category: str = "unknown",
+    ):
         """Write a new correction table row immediately (never batch).
 
         Matches the format defined in kb/corrections/corrections_log.md:
@@ -170,6 +219,7 @@ class ContextManager:
         """
         entry_id = self._next_entry_id()
         date = str(datetime.utcnow().date())
+
         # Sanitize pipe chars so they don't break the table
         def clean(s: str) -> str:
             return s.replace("|", "/").replace("\n", " ").strip()

@@ -17,6 +17,10 @@ select = ["E", "F", "I", "W"]
 [tool.ruff.lint.per-file-ignores]
 # Prompt f-strings are inherently long; E501 is not actionable here
 "agent/prompt_library.py" = ["E501"]
+# Large orchestration + MCP tool tables — line breaks would harm readability
+"agent/agent_core.py" = ["E501"]
+"mcp/mcp_server.py" = ["E501"]
+"agent/self_corrector.py" = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

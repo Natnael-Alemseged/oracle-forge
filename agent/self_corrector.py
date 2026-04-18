@@ -21,14 +21,20 @@ def _strip_markdown(text: str) -> str:
 
 
 class SelfCorrector:
-
     def __init__(self, prompt_library: PromptLibrary, client: OpenAI):
         self.prompts = prompt_library
         self.client = client
         self.max_retries = 3
 
-    def correct(self, original_question: str, failed_query: str, error: str,
-                db_type: str, schema: str, attempt: int) -> str:
+    def correct(
+        self,
+        original_question: str,
+        failed_query: str,
+        error: str,
+        db_type: str,
+        schema: str,
+        attempt: int,
+    ) -> str:
         """Generate a corrected query. Diagnoses failure type first to pick the right strategy."""
         failure_type = self.diagnose_failure(error, failed_query)
         fix_strategy = self.get_fix_strategy(failure_type, error, schema)
@@ -54,17 +60,26 @@ class SelfCorrector:
         return "unknown"
 
     def get_fix_strategy(self, failure_type: str, error: str, schema: str) -> str:
+        is_crm = (
+            "CRMArena" in schema or "VoiceCallTranscript" in schema or "knowledge__kav" in schema
+        )
         strategies = {
             "syntax_error": (
                 f"Fix SQL/query syntax. Error: {error}. "
-                "If the error is near an apostrophe (e.g. \"Children's\"), "
+                'If the error is near an apostrophe (e.g. "Children\'s"), '
                 "use doubled single quotes in SQL: 'Children''s Books' — NEVER backslash escaping."
             ),
             "wrong_table": (
                 f"Check schema for correct table/collection names.\nSchema:\n{schema}\n"
-                "IMPORTANT: PostgreSQL and SQLite are separate databases — "
-                "do NOT write a single SQL query that references tables from both. "
-                "Query each database independently."
+                + (
+                    "CRITICAL: Only use tables listed in the schema above for THIS specific database. "
+                    "Do NOT reference tables from other CRM databases (e.g. Case, casehistory__c belong to 'support', not other DBs). "
+                    "Do NOT use schema-qualified names like 'core_crm.User' — just use 'User'."
+                    if is_crm
+                    else "IMPORTANT: PostgreSQL and SQLite are separate databases — "
+                    "do NOT write a single SQL query that references tables from both. "
+                    "Query each database independently."
+                )
             ),
             "join_key_format": (
                 "Normalize join key types (e.g., cast integer to varchar or vice versa)"
