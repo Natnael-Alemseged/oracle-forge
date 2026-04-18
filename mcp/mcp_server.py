@@ -67,6 +67,14 @@ MUSIC_BRAINZ_SALES_PATH = os.getenv(
     "MUSIC_BRAINZ_SALES_PATH",
     f"{_UMB}/query_music_brainz_20k/query_dataset/sales.duckdb",
 )
+STOCKMARKET_INFO_PATH = os.getenv(
+    "STOCKMARKET_INFO_PATH",
+    f"{_UMB}/query_stockmarket/query_dataset/stockinfo_query.db",
+)
+STOCKMARKET_TRADE_PATH = os.getenv(
+    "STOCKMARKET_TRADE_PATH",
+    f"{_UMB}/query_stockmarket/query_dataset/stocktrade_query.db",
+)
 # Module-level MongoDB client — connection pool shared across all requests
 _mongo_client: Optional[MongoClient] = None
 
@@ -145,6 +153,16 @@ TOOLS = [
     {
         "name": "pancancer_clinical_query",
         "description": "Executes SQL against the PostgreSQL PanCancer Atlas clinical database.",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "stockmarket_info_query",
+        "description": "Executes SQL against the stockmarket info SQLite database (stockinfo table with Symbol, Listing Exchange, Market Category, ETF, Financial Status, Company Description).",
+        "parameters": {"sql": {"type": "string"}},
+    },
+    {
+        "name": "stockmarket_trade_query",
+        "description": "Executes analytical SQL against the stockmarket trade DuckDB database. Each stock symbol is its own table (e.g. SELECT * FROM AAPL). Columns: Date, Open, High, Low, Close, Adj Close, Volume.",
         "parameters": {"sql": {"type": "string"}},
     },
     {
@@ -258,6 +276,8 @@ def _dispatch(tool_name: str, params: dict) -> Any:
         "music_brainz_sales_query": _music_brainz_sales_query,
         "github_repos_metadata_query": _github_repos_metadata_query,
         "github_repos_artifacts_query": _github_repos_artifacts_query,
+        "stockmarket_info_query": _stockmarket_info_query,
+        "stockmarket_trade_query": _stockmarket_trade_query,
         "mongo_aggregate": _mongo_aggregate,
         "mongo_find": _mongo_find,
         "sqlite_query": _sqlite_query,
@@ -447,6 +467,33 @@ def _github_repos_artifacts_query(params: dict) -> list[dict]:
     if not sql:
         raise ValueError("Parameter 'sql' is required")
     conn = duckdb.connect(GITHUB_REPOS_ARTIFACTS_PATH, read_only=True)
+    try:
+        result = conn.execute(sql)
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+    finally:
+        conn.close()
+
+
+def _stockmarket_info_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = sqlite3.connect(STOCKMARKET_INFO_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _stockmarket_trade_query(params: dict) -> list[dict]:
+    sql = params.get("sql", "")
+    if not sql:
+        raise ValueError("Parameter 'sql' is required")
+    conn = duckdb.connect(STOCKMARKET_TRADE_PATH, read_only=True)
     try:
         result = conn.execute(sql)
         cols = [d[0] for d in result.description]

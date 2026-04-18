@@ -463,3 +463,38 @@ For Q2 type (most copied Swift file):
 - For Q4 type (top repos by commits, not Python): Query DuckDB commits directly, then filter by joining with SQLite language info
 - CORRECT Q4 pattern: github_repos_artifacts_query first: SELECT repo_name, COUNT(*) as num_commits FROM commits GROUP BY repo_name ORDER BY num_commits DESC LIMIT 10 — then filter out Python repos using SQLite results
 - CORRECT Q3 pattern: github_repos_metadata_query: SELECT DISTINCT l.repo_name FROM languages l JOIN licenses li ON l.repo_name = li.repo_name WHERE l.language_description LIKE '%Shell%' AND li.license = 'apache-2.0' — then github_repos_artifacts_query: SELECT COUNT(*) as num_messages FROM commits WHERE repo_name IN (results from metadata) AND message IS NOT NULL AND LENGTH(message) < 1000 AND LOWER(message) NOT LIKE 'merge%' AND LOWER(message) NOT LIKE 'update%' AND LOWER(message) NOT LIKE 'test%'
+
+### stockmarket — info database (stockmarket_info_query tool)
+SQLite database with 1 table:
+
+**Table: stockinfo**
+- Symbol (TEXT): Stock ticker symbol e.g. "AAPL"
+- "Nasdaq Traded" (TEXT): Y/N
+- "Listing Exchange" (TEXT): Exchange code e.g. "Q"=NASDAQ, "N"=NYSE, "A"=NYSE MKT, "P"=NYSE Arca, "Z"=BATS
+- "Market Category" (TEXT): e.g. "Q"=NASDAQ Global Select, "G"=NASDAQ Global Market, "S"=NASDAQ Capital Market
+- "ETF" (TEXT): Y/N — whether it is an ETF
+- "Financial Status" (TEXT): e.g. "D"=Deficient, "E"=Delinquent, "Q"=Bankrupt, "N"=Normal, "G"=Deficient+Bankrupt
+- "Company Description" (TEXT): Full company name
+
+### stockmarket — trade database (stockmarket_trade_query tool)
+DuckDB database where EACH STOCK SYMBOL is its own table.
+To query a stock, use its symbol as the table name: SELECT * FROM AAPL
+
+**Each symbol table has columns:**
+- Date (DATE): Trading date
+- Open (DOUBLE): Opening price
+- High (DOUBLE): Highest price
+- Low (DOUBLE): Lowest price
+- Close (DOUBLE): Closing price
+- "Adj Close" (DOUBLE): Adjusted closing price
+- Volume (BIGINT): Trading volume
+
+**CRITICAL RULES for stockmarket:**
+- Use stockmarket_info_query for: company info, ETF status, exchange, financial status
+- Use stockmarket_trade_query for: prices, volume, trading history per symbol
+- To get price data: SELECT * FROM SYMBOL_NAME (e.g. SELECT * FROM REAL)
+- To find a symbol from company name: query stockinfo WHERE "Company Description" LIKE '%name%'
+- "Listing Exchange" values: Q=NASDAQ, N=NYSE, A=NYSE MKT/American, P=NYSE Arca, Z=BATS
+- For NYSE queries use: WHERE "Listing Exchange" = 'N'
+- For NYSE Arca queries use: WHERE "Listing Exchange" = 'P'
+- For NASDAQ queries use: WHERE "Listing Exchange" = 'Q'
