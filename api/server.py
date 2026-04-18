@@ -105,3 +105,10 @@ async def query(body: QueryInput):
         dataset=body.dataset,
         confidence=response.confidence,
     )
+
+from fastapi.responses import HTMLResponse
+from api.ui import FALCONQUERY_HTML
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_ui():
+    return HTMLResponse(content=FALCONQUERY_HTML)
