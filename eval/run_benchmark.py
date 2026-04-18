@@ -73,6 +73,7 @@ DATASET_DBS = {
     "yelp":       ["mongodb", "duckdb"],
     "bookreview": ["postgresql_bookreview", "sqlite"],
     "agnews":     ["mongodb", "sqlite"],
+    "GITHUB_REPOS": ["github_repos_metadata", "github_repos_artifacts"],
 }
 
 
