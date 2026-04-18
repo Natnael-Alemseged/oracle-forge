@@ -10,6 +10,9 @@ MCP_BASE_URL = "http://localhost:5000"
 DB_TYPE_TO_TOOL = {
     "mongodb":                 "mongo_aggregate",
     "duckdb":                  "duckdb_query",
+    # Logical names (fallback if SubQuery.database_type not normalized)
+    "project_database":        "duckdb_query",
+    "package_database":        "sqlite_query",
     "postgresql":              "postgres_query",
     "postgresql_bookreview":   "bookreview_query",
     "postgresql_crm":          "crm_support_query",

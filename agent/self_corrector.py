@@ -57,6 +57,8 @@ class SelfCorrector:
             return "wrong_table"
         if any(k in e for k in ["no results", "empty", "null", "zero rows"]):
             return "domain_knowledge_gap"
+        if "no mcp tool mapped" in e:
+            return "routing_error"
         return "unknown"
 
     def get_fix_strategy(self, failure_type: str, error: str, schema: str) -> str:
@@ -87,6 +89,10 @@ class SelfCorrector:
             "domain_knowledge_gap": (
                 "Check domain KB for correct field values, status codes, or fiscal periods"
             ),
+            "routing_error": (
+                "The executor could not route this query to a database tool. "
+                "Regenerate a valid SQLite or DuckDB SELECT using ONLY tables in the schema, with no cross-database joins."
+            ),
             "unknown": f"Analyze error and regenerate query. Error: {error}",
         }
-        return strategies[failure_type]
+        return strategies.get(failure_type, strategies["unknown"])
