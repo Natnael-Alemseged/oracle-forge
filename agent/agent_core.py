@@ -12,6 +12,42 @@ from agent.query_executor import QueryExecutor
 from agent.self_corrector import SelfCorrector
 
 
+
+def _enforce_intent_db_coverage(question: str, available_databases: list, intent: dict, dataset: str = "") -> dict:
+    """Ensure intent includes all available databases when the question needs them."""
+    target = intent.get('target_databases', [])
+    if not target:
+        intent['target_databases'] = list(available_databases)
+        intent['requires_join'] = len(available_databases) > 1
+        return intent
+    join_keywords = ['most', 'top', 'highest', 'proportion', 'count', 'how many',
+                     'which', 'list', 'identify', 'number of', 'frequently', 'average']
+    q_lower = question.lower()
+    if any(kw in q_lower for kw in join_keywords) and len(available_databases) > 1:
+        for db in available_databases:
+            if db not in target:
+                target.append(db)
+        intent['target_databases'] = target
+        intent['requires_join'] = True
+    return intent
+
+
+def _validate_query_semantics(question: str, db_type: str, query: str) -> None:
+    """Perform semantic validation on a generated query.
+    Raises ValueError if the query has obvious semantic problems.
+    Passes silently if the query looks correct.
+    """
+    q = query.strip().lower()
+    if q.startswith('select null'):
+        raise ValueError('Query is a SELECT NULL fallback')
+    if len(q) < 10:
+        raise ValueError(f'Query too short to be valid: {query[:50]}')
+    if db_type == 'duckdb' and 'from business' in q:
+        raise ValueError('DuckDB has no business table — route business queries to MongoDB')
+    if db_type == 'sqlite' and 'try_strptime' in q:
+        raise ValueError('TRY_STRPTIME is DuckDB syntax, not valid in SQLite')
+    return
+
 class AgentCore:
 
     def __init__(self, context_manager: ContextManager, prompt_library: PromptLibrary):
@@ -394,6 +430,42 @@ class AgentCore:
             # Replace duck_sq in sub_queries for the trace
             sub_queries = [mongo_sq if sq.database_type == "mongodb" else duck_sq
                            for sq in sub_queries]
+        elif any(sq.database_type == "github_repos_metadata" for sq in sub_queries):
+            # GITHUB_REPOS: SQLite-first — get repo_names from metadata, then query artifacts
+            meta_sq = next((sq for sq in sub_queries if sq.database_type == "github_repos_metadata"), None)
+            art_sq  = next((sq for sq in sub_queries if sq.database_type == "github_repos_artifacts"), None)
+            if meta_sq and art_sq:
+                # Step 1: Run SQLite metadata query
+                meta_result, meta_corr = self._execute_with_retry(meta_sq, request.question)
+                raw_results["github_repos_metadata"] = meta_result
+                self_corrections.extend(meta_corr)
+                # Extract repo_names from SQLite result
+                repo_names = []
+                if isinstance(meta_result, list):
+                    for row in meta_result:
+                        rn = row.get("repo_name") or row.get("REPO_NAME")
+                        if rn:
+                            repo_names.append(rn)
+                # Step 2: Inject repo_names into DuckDB query
+                if repo_names:
+                    repo_list = ", ".join("'" + r.replace("'", "''") + "'" for r in repo_names[:5000])
+                    new_art_query = art_sq.query.replace("IN ('repo1','repo2')", "IN (" + repo_list + ")")
+                    new_art_query = new_art_query.replace("IN ('repo1', 'repo2')", "IN (" + repo_list + ")")
+                    art_sq = SubQuery(
+                        database_type="github_repos_artifacts",
+                        query=new_art_query,
+                        intent=art_sq.intent,
+                    )
+                    merge_operations.append("github_repos_metadata->artifacts join on " + str(len(repo_names)) + " repos")
+                # Step 3: Run DuckDB artifacts query
+                art_result, art_corr = self._execute_with_retry(art_sq, request.question)
+                raw_results["github_repos_artifacts"] = art_result
+                self_corrections.extend(art_corr)
+            else:
+                for sq in sub_queries:
+                    result, corrections = self._execute_with_retry(sq, request.question)
+                    raw_results[sq.database_type] = result
+                    self_corrections.extend(corrections)
         else:
             # Generic multi-DB path — handles postgresql+sqlite, and any other combination
             pg_sq   = next(
