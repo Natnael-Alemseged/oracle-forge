@@ -19,14 +19,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
+from agent.agent_core import AgentCore
+from agent.context_manager import ContextManager
 from agent.models import QueryRequest
 from agent.prompt_library import PromptLibrary
-from agent.context_manager import ContextManager
-from agent.agent_core import AgentCore
+
+load_dotenv()
 
 DAB_ROOT = Path(os.getenv("DAB_ROOT", "/home/yakob/oracle-forge/DataAgentBench"))
+# DAB common_scaffold must be importable for validate.py files
+if str(DAB_ROOT) not in sys.path:
+    sys.path.insert(0, str(DAB_ROOT))
 
 AGENT_MD    = "agent/AGENT.md"
 CORRECTIONS = "kb/corrections/corrections_log.md"
@@ -36,6 +39,7 @@ DATASET_DBS = {
     "yelp":       ["mongodb", "duckdb"],
     "bookreview": ["postgresql", "sqlite"],
     "agnews":     ["mongodb", "sqlite"],
+    "PATENTS":    ["postgresql", "sqlite"],
 }
 
 
@@ -73,11 +77,12 @@ def build_agent() -> AgentCore:
 
 
 async def run_one(agent: AgentCore, question: str, available_dbs: list[str],
-                  session_id: str) -> str:
+                  session_id: str, dataset: str = "") -> str:
     request = QueryRequest(
         question=question,
         available_databases=available_dbs,
         session_id=session_id,
+        dataset=dataset.lower(),
     )
     response = await agent.run(request)
     return response.answer
@@ -117,7 +122,7 @@ async def main():
             agent = build_agent()  # fresh agent per trial to reset session history
             session_id = f"{args.dataset}-{qid}-t{trial}"
             try:
-                answer = await run_one(agent, question, available_dbs, session_id)
+                answer = await run_one(agent, question, available_dbs, session_id, args.dataset)
                 print(f"  Trial {trial+1} answer: {answer[:120]}")
             except Exception as e:
                 answer = f"ERROR: {e}"
@@ -128,7 +133,9 @@ async def main():
             else:
                 ok, reason = False, "no validate.py"
 
-            trial_results.append({"trial": trial + 1, "answer": answer, "passed": ok, "reason": reason})
+            trial_results.append(
+                {"trial": trial + 1, "answer": answer, "passed": ok, "reason": reason}
+            )
             total += 1
             if ok:
                 passed += 1

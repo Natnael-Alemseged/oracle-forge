@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import sqlite3
+from pathlib import Path as FsPath
 from typing import Any, Optional
 
 import duckdb
@@ -43,6 +44,58 @@ MONGO_DB   = "yelp_db"
 
 SQLITE_PATH = os.getenv("SQLITE_PATH", "db/dab_sqlite.db")
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "db/yelp_user.db")
+
+# Dataset-specific DB routing — overrides the defaults above
+_DAB_ROOT = os.getenv("DAB_ROOT", "/home/natnael/DataAgentBench")
+
+POSTGRES_DB_BY_DATASET: dict[str, str] = {
+    "patents":    "patent_cpcdefinition",
+    "bookreview": "bookreview_db",
+}
+
+def _has_sqlite_table(path: str, table_name: str) -> bool:
+    if not path or not FsPath(path).exists():
+        return False
+    conn = sqlite3.connect(path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        )
+        return cur.fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _resolve_patents_sqlite_path() -> str:
+    env_path = os.getenv("PATENTS_SQLITE_PATH", "")
+    candidates = [
+        env_path,
+        f"{_DAB_ROOT}/query_PATENTS/query_dataset/patent_publication.db",
+        f"{_DAB_ROOT}/query_patents/query_dataset/patent_publication.db",
+        "/home/natnael/DataAgentBench/query_PATENTS/query_dataset/patent_publication.db",
+        "/home/natnael/DataAgentBench_writable/query_PATENTS/query_dataset/patent_publication.db",
+        "/home/natnael/oracle-forge/db/patent_publication.db",
+    ]
+    for candidate in candidates:
+        if _has_sqlite_table(candidate, "publicationinfo"):
+            return candidate
+    # Keep previous fallback behavior even if unresolved.
+    return env_path or "/home/natnael/oracle-forge/db/patent_publication.db"
+
+
+SQLITE_PATH_BY_DATASET: dict[str, str] = {
+    "patents":    _resolve_patents_sqlite_path(),
+    "bookreview": f"{_DAB_ROOT}/query_bookreview/query_dataset/review_query.db",
+    "agnews":     f"{_DAB_ROOT}/query_agnews/query_dataset/metadata.db",
+}
+
+MONGO_DB_BY_DATASET: dict[str, str] = {
+    "agnews": "articles_db",
+}
 
 # Module-level MongoDB client — connection pool shared across all requests
 _mongo_client: Optional[MongoClient] = None
@@ -208,11 +261,43 @@ def _postgres_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
         raise ValueError("Parameter 'sql' is required")
-    conn = psycopg2.connect(
-        host=POSTGRES_HOST, port=POSTGRES_PORT,
-        dbname=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASS,
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
+    dataset = params.get("dataset", "")
+    dbname = POSTGRES_DB_BY_DATASET.get(dataset, POSTGRES_DB)
+    connect_attempts = [
+        {
+            "host": POSTGRES_HOST,
+            "port": POSTGRES_PORT,
+            "dbname": dbname,
+            "user": POSTGRES_USER,
+            "password": POSTGRES_PASS,
+            "cursor_factory": psycopg2.extras.RealDictCursor,
+        },
+        # Local socket fallback often works on VPS when TCP password auth is unavailable.
+        {
+            "dbname": dbname,
+            "user": POSTGRES_USER,
+            "cursor_factory": psycopg2.extras.RealDictCursor,
+        },
+        # Final fallback for environments configured with peer trust for postgres user.
+        {
+            "dbname": dbname,
+            "user": "postgres",
+            "cursor_factory": psycopg2.extras.RealDictCursor,
+        },
+    ]
+
+    conn = None
+    last_err = None
+    for kwargs in connect_attempts:
+        try:
+            conn = psycopg2.connect(**kwargs)
+            break
+        except psycopg2.OperationalError as exc:
+            last_err = exc
+            continue
+    if conn is None:
+        raise RuntimeError(f"PostgreSQL connection failed for dataset='{dataset}': {last_err}")
+
     try:
         cur = conn.cursor()
         cur.execute(sql)
@@ -226,7 +311,9 @@ def _mongo_aggregate(params: dict) -> list[dict]:
     if not collection:
         raise ValueError("Parameter 'collection' is required")
     pipeline = _safe_json(params.get("pipeline", "[]"))
-    db = _get_mongo()[MONGO_DB]
+    dataset = params.get("dataset", "")
+    mongo_db_name = MONGO_DB_BY_DATASET.get(dataset, MONGO_DB)
+    db = _get_mongo()[mongo_db_name]
     return [_serialize_doc(d) for d in db[collection].aggregate(pipeline)]
 
 
@@ -236,7 +323,9 @@ def _mongo_find(params: dict) -> list[dict]:
         raise ValueError("Parameter 'collection' is required")
     filter_doc = _safe_json(params.get("filter", "{}")) or {}
     projection = _safe_json(params.get("projection")) if params.get("projection") else None
-    db = _get_mongo()[MONGO_DB]
+    dataset = params.get("dataset", "")
+    mongo_db_name = MONGO_DB_BY_DATASET.get(dataset, MONGO_DB)
+    db = _get_mongo()[mongo_db_name]
     return [_serialize_doc(d) for d in db[collection].find(filter_doc, projection)]
 
 
@@ -244,7 +333,15 @@ def _sqlite_query(params: dict) -> list[dict]:
     sql = params.get("sql", "")
     if not sql:
         raise ValueError("Parameter 'sql' is required")
-    conn = sqlite3.connect(SQLITE_PATH)
+    dataset = params.get("dataset", "")
+    path = SQLITE_PATH_BY_DATASET.get(dataset, SQLITE_PATH)
+    if dataset == "patents" and not _has_sqlite_table(path, "publicationinfo"):
+        raise RuntimeError(
+            f"PATENTS SQLite database not ready at '{path}'. "
+            "Expected table 'publicationinfo'. "
+            "Set PATENTS_SQLITE_PATH or DAB_ROOT to a valid DataAgentBench PATENTS DB."
+        )
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()

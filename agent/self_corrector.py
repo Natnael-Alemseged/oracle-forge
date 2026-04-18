@@ -35,7 +35,7 @@ class SelfCorrector:
         prompt = self.prompts.self_correct(
             original_question, failed_query, error, db_type, schema, fix_strategy
         )
-        return _strip_markdown(llm_client.call(self.client, prompt, max_tokens=512))
+        return _strip_markdown(llm_client.call(self.client, prompt, max_tokens=1200))
 
     def diagnose_failure(self, error: str, query: str) -> str:
         """Categorize the failure into one of 4 types to guide correction strategy."""

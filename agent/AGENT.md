@@ -114,6 +114,57 @@ These mismatches will cause silent wrong answers if not handled:
 7. If results are empty, say so explicitly — do not fabricate
 8. Do not conflate MongoDB fields with DuckDB fields — they are different databases
 
+## agnews Dataset — Two-Database Schema (MongoDB + SQLite)
+
+### MongoDB — `articles_db`, collection: `articles` (127,600 documents)
+| Field | Type | Example |
+|-------|------|---------|
+| article_id | int | 0, 1, 127599 |
+| title | str | "Wall St. Bears Claw Back Into the Black (Reuters)" |
+| description | str | "Reuters - Short-sellers, Wall Street's dwindling band..." |
+
+**NO `category`, `label`, or `class` field exists.** Do not generate queries
+filtering by any of those field names — they will return empty results.
+
+### SQLite — `metadata.db`
+**Table: `article_metadata`**
+| Field | Type | Example |
+|-------|------|---------|
+| article_id | int | 0 — FK → `articles.article_id` |
+| author_id | int | 42 |
+| region | TEXT | "Europe", "Asia", "North America", "South America", "Africa", "Oceania" |
+| publication_date | TEXT | "2022-09-18" (YYYY-MM-DD — use `strftime('%Y', publication_date)` for year) |
+
+**Table: `authors`**
+| Field | Type | Example |
+|-------|------|---------|
+| author_id | int | 0 |
+| name | TEXT | "Amy Jones" |
+
+### agnews Category Inference Rules
+All articles belong to exactly one of four categories: **World**, **Sports**, **Business**, **Science/Technology**.
+There is no category field — the category MUST be inferred from the `title` and `description` fields.
+
+**Pipeline pattern for category questions:**
+1. Run SQLite first for any non-category filters (author name, region, publication year).
+2. Use the returned `article_id` list to fetch MongoDB articles: `{"$match": {"article_id": {"$in": [list_of_ids]}}}`.
+3. During synthesis, classify each article's category by reading its title and description.
+4. Then compute the requested aggregate (count, fraction, average, group-by region).
+
+**For questions with no SQLite filter (e.g., query is purely about article content):**
+Use MongoDB aggregation directly. For description length: `{"$addFields": {"desc_len": {"$strLenCP": "$description"}}}`.
+
+**Join key:** `article_metadata.article_id` (int) = `articles.article_id` (int). Direct integer equality — no format transformation needed.
+
+**Example: get Amy Jones article_ids (SQLite):**
+`SELECT am.article_id FROM article_metadata am JOIN authors a ON am.author_id = a.author_id WHERE a.name = 'Amy Jones'`
+
+**Example: fetch those articles from MongoDB:**
+`[{"$collection": "articles"}, {"$match": {"article_id": {"$in": [0, 5, 22]}}}, {"$project": {"_id": 0, "article_id": 1, "title": 1, "description": 1}}]`
+
+**Example: articles sorted by description length (no category filter — classify during synthesis):**
+`[{"$collection": "articles"}, {"$addFields": {"desc_len": {"$strLenCP": "$description"}}}, {"$sort": {"desc_len": -1}}, {"$limit": 200}, {"$project": {"_id": 0, "article_id": 1, "title": 1, "description": 1, "desc_len": 1}}]`
+
 ## Context Layers Injected at Session Start
 - **Layer 1**: This file (schema + behavioral rules)
 - **Layer 2**: `kb/domain/domain_knowledge.md` (domain terms, fiscal conventions)

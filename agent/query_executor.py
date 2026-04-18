@@ -1,10 +1,11 @@
 import json
+import os
 
 import httpx
 
 from agent.models import SubQuery
 
-MCP_BASE_URL = "http://localhost:5000"
+MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:5000")
 
 # Maps DB type to MCP tool name (must match toolbox.runtime.yaml exactly)
 DB_TYPE_TO_TOOL = {
@@ -28,6 +29,7 @@ class QueryExecutor:
     def __init__(self, mcp_base_url: str = MCP_BASE_URL, timeout: float = 30.0):
         self.endpoint = mcp_base_url.rstrip("/") + "/mcp"
         self.timeout = timeout
+        self.dataset: str = ""  # set by AgentCore.run() before executing
 
     def execute(self, sub_query: SubQuery) -> dict:
         """Execute a sub-query via MCP JSON-RPC. Raises on error — caller handles retry."""
@@ -79,9 +81,15 @@ class QueryExecutor:
                 pipeline = sub_query.query
                 collection = "business"
             serialized = pipeline if isinstance(pipeline, str) else json.dumps(pipeline)
-            return {"collection": collection, "pipeline": serialized}
+            args: dict = {"collection": collection, "pipeline": serialized}
+            if self.dataset:
+                args["dataset"] = self.dataset
+            return args
 
-        return {"sql": sub_query.query}
+        args: dict = {"sql": sub_query.query}
+        if self.dataset:
+            args["dataset"] = self.dataset
+        return args
 
     def merge(self, left: dict, right: dict, left_key: str, right_key: str,
               left_db: str, right_db: str) -> dict:

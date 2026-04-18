@@ -27,3 +27,12 @@ Then add a row to the table above with the date, query count, pass@1, and a one-
 | 20260413_205007 | yelp | 0/7 | 0% | pass@1 | — |
 | 20260414_044753 | yelp | 1/7 | 14% | pass@1 | — |
 | 20260414_084345 | yelp | 0/7 | 0% | pass@1 | — |
+| 20260417_165656 | PATENTS | 0/3 | 0% | pass@1 | — |
+| 20260417_170351 | PATENTS | 0/3 | 0% | pass@1 | — |
+| 20260417_170925 | PATENTS | 0/3 | 0% | pass@1 | — |
+| 20260417_171503 | PATENTS | 0/3 | 0% | pass@1 | — |
+| 20260417_174752 | agnews | 0/4 | 0% | pass@1 | — |
+| 20260417_174946 | agnews | 0/4 | 0% | pass@1 | — |
+| 20260417_180024 | agnews | 0/4 | 0% | pass@1 | — |
+| 20260417_180359 | agnews | 0/4 | 0% | pass@1 | — |
+| 20260417_180512 | agnews | 0/4 | 0% | pass@1 | — |
