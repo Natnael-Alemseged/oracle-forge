@@ -6,7 +6,6 @@ __pycache__/
 *.pyo
 
 # Environment secrets
-.env
 *.env
 
 # Database files (too large for git)
@@ -37,3 +36,5 @@ toolbox
 
 .gitignore
 branch_structure.json
+config.bat
+node_modules
