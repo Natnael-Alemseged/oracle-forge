@@ -9,6 +9,10 @@ Usage:
     python eval/run_benchmark.py --dataset yelp --trials 3
 """
 
+import utils.clients
+import utils.http_session
+import utils.transport
+import utils.session
 import argparse
 import asyncio
 import importlib.util
